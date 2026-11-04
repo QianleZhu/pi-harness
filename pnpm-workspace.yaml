@@ -87,6 +87,8 @@ catalog:
 
 catalogMode: strict
 cleanupUnusedCatalogs: true
+# 使用 pnpm 的跨平台脚本解释器，兼容 Windows 下的环境变量赋值。
+shellEmulator: true
 
 overrides:
   "@lobehub/icons@5.16.0>@lobehub/ui": "-"

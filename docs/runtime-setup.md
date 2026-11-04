@@ -29,6 +29,14 @@ Memory 混合检索、MCP 工具混合检索和 Session 搜索分别服务具体
 
 仓库要求 Node.js 24 或更高版本，包管理器为根 package.json 指定的 pnpm 10.33.2。第三方版本由 [pnpm-workspace.yaml](../pnpm-workspace.yaml) 的严格 Catalog 管理，内部包使用 workspace:*。按需执行 pnpm install 安装依赖。
 
+### Windows Web 本地运行
+
+在 PowerShell 中进入仓库，执行 `pnpm install --frozen-lockfile --filter '@pi-harness/daemon...' --filter '@pi-harness/web...'`，然后运行 `pnpm dev`，访问 `http://127.0.0.1:5173`。按 Ctrl+C 停止。工作区启用 pnpm 的脚本模拟器，让 daemon 开发脚本的环境变量赋值在 Windows 上可用。默认开发数据保存在仓库的 `.pi-harness` 目录。
+
+Web 登录需要有效的 GitHub OAuth App Client ID 和 Client Secret，回调地址为 `http://127.0.0.1:4310/api/auth/github/callback`；模型对话还需要在应用中配置可用的模型 Provider 凭据。根目录已有有效的 `.env.enc` 和 `.env.key` 时，可在 `.env` 不存在的前提下用 `pnpm env:decrypt` 恢复；否则按上方配置项自行填写，不能直接复制含空 OAuth 值的示例。不要分享密钥或明文配置。
+
+Windows 下非完全访问模式的受沙箱监管命令与普通 stdio MCP 目前无法启动，详见 [Sandbox 说明](../packages/sandbox/README.md)；完全访问模式会直接使用宿主机权限，只有理解风险时才应选择。Computer Use 当前仅支持 macOS。网络搜索需要另行启动本机 SearXNG；它不是启动 Web 和 daemon 的前提。
+
 以下命令可按需执行。
 
 | 命令 | 行为与前提 |

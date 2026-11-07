@@ -316,6 +316,10 @@ export const sessionQueryKeys = {
 - 不自动执行 dev 或 build 命令，除非用户明确要求。
 - 不自动执行任何 git 命令，除非用户明确要求。
 
+## 博客写作约定
+
+- 用户要求撰写博客时，默认将文章保存到 `D:\pi-harness\judy的学习之路`；用户指定其他保存位置时，以用户的要求为准。
+
 ## Git 提交规范
 
 - 提交信息遵循 Conventional Commits，格式为 `<type>(<scope>): <subject>`。

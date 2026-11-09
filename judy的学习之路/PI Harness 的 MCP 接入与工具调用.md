@@ -57,6 +57,24 @@ HTTP 连接使用 SDK 的 `StreamableHTTPClientTransport`。项目传入 OAuth p
 
 调用方使用的是连接租约。一次工具调用结束后释放租约，Client 可以继续留在管理器中复用。配置失效或 daemon 关闭时，管理器会关闭相关连接。
 
+### 连接和租约是什么关系
+
+连接是 Client 与 MCP Server 之间的逻辑通信关系。stdio 通过子进程的标准输入输出通信；Streamable HTTP 使用 HTTP transport，逻辑连接不意味着必须一直占用同一条 TCP 连接。
+
+租约是 `McpClientManager` 提供的一次使用权。工具通过 `acquire` 获取租约，用其中的 `client` 发起请求，结束后调用 `release`。管理器通过租约计数跟踪 Client 是否正在使用，空闲时可以保留连接供下一次调用复用。
+
+```text
+第一次调用
+  acquire → 创建或取得 Client → callTool → release
+                     ↓
+              管理器保留连接
+
+后续调用
+  acquire → 尝试复用 Client → callTool → release
+```
+
+复用有条件。管理器按 Session 对应的 owner、工作目录、服务器 ID、配置版本和凭据身份等信息区分连接。配置变化、连接失效、daemon 关闭或达到连接数量上限时，原连接可能被关闭，后续调用需要创建新 Client。释放租约本身通常不会关闭已经建立的连接。
+
 ## 服务端工具怎样进入项目
 
 MCP Server 的地址只告诉项目去哪里连接。Agent 还需要知道服务端有哪些工具，以及每个工具接受什么参数。
@@ -134,6 +152,86 @@ try {
 `callTool` 通过当前 transport 把请求发给 MCP Server。对于 HTTP 服务，请求通过网络发送；对于 stdio 服务，消息通过本地子进程的标准输入输出传递。服务端返回后，项目在 [tool-result.ts](../apps/daemon/src/mcp/utils/tool-result.ts) 中转换结果，并移除已知连接凭据，再把结果交给 Agent。
 
 连接中断或超时时，服务端可能已经执行了操作，只是响应没有到达。项目把这种情况视为结果未知，不自动重试，避免重复产生外部副作用。
+
+## 协议版本、补充信息与操作续接
+
+MCP Server 需要用户补充信息时，能否继续执行取决于工具设计、双方使用的协议版本，以及 Client 和 Host 是否实现对应的交互方式。先看协议版本如何确定，再看服务端怎样提出请求。
+
+### 连接时怎样确定协议版本
+
+MCP 规范使用日期作为版本标识，例如 `2025-06-18` 和 `2025-11-25`。它表示协议规范版本，不是服务器发布时间，也不是 SDK 包版本。不同规范版本对消息格式和可用能力有不同约定。
+
+项目当前采用 2025 系列的初始化握手流程。Client 发送 `initialize`，提议协议版本并声明客户端能力；Server 返回它选定的版本和服务端能力。Client 能接受该版本时，发送 `notifications/initialized`，然后双方继续通信。无法达成一致时连接不能正常使用。具体版本由当次协商决定。[MCP 协议版本说明](https://php.sdk.modelcontextprotocol.io/protocol-versions/)
+
+```text
+Client 发送 initialize，提议版本并声明能力
+    ↓
+Server 返回选定版本和服务端能力
+    ↓
+Client 接受后发送 notifications/initialized
+    ↓
+双方使用协商结果通信
+```
+
+项目在 [client-manager.ts](../apps/daemon/src/mcp/client-manager.ts) 中调用 `client.connect`，握手由 SDK 处理。当前默认连接范围不包含仅支持 2026 `server/discover` 现代协议的服务器，见 [架构设计](../docs/架构设计.md)。协议定义了某项能力，还需要 Client 和 Host 实现它，用户才能完成对应的交互。
+
+### 方式一，服务端返回普通工具结果
+
+Server 可以让工具返回普通结果，提示缺少项目 ID、需要确认操作，或者提供一个供后续调用使用的标识。`client.callTool()` 返回时，本次工具调用已经结束。
+
+```text
+第一次 tool call → Server 返回普通结果，提示补充信息
+    ↓
+Agent 根据结果询问用户 → 用户回答
+    ↓
+Agent 按服务端工具定义发起新的 tool call
+```
+
+PI Harness 会转换工具结果并交给 Agent 继续处理。项目不会仅凭结果文字自动生成内置审批卡，也不会自动恢复已经返回的那次 MCP 调用。Agent 能否理解并继续，取决于工具结果、工具描述、当前上下文以及服务端设计。
+
+### 方式二，2025 系列协议中的 Elicitation
+
+支持 Elicitation 的 Server 可以在工具执行过程中，通过 `elicitation/create` 向 Client 请求用户输入。Host 负责展示问题，Client 再把答复返回 Server。双方需要支持对应的协议版本和能力。
+
+```text
+tool call 尚未返回
+    ↓
+Server 发起 elicitation/create
+    ↓
+Host 收集用户答复 → Client 返回答复
+    ↓
+Server 继续执行 → 返回最终工具结果
+```
+
+具体交互可以是表单，也可以引导用户前往 URL，取决于协议版本和双方支持的模式。[MCP TypeScript SDK 的 Elicitation 说明](https://ts.sdk.modelcontextprotocol.io/v2/servers/elicitation)
+
+PI Harness 当前尚未将 Elicitation 接入可用的产品流程，因此不能依靠现有实现处理这种服务端主动发起的输入请求。限制记录在 [MCP 使用说明](../docs/mcp-usage.md) 中。
+
+### 方式三，2026 协议中的多轮请求
+
+2026-07-28 协议引入 Multi Round-Trip Requests，简称 MRTR。Server 可以返回协议定义的 `input_required`，附带输入请求和 `requestState`。支持该流程的 Client 收集用户答复后，带上 `inputResponses` 和原样返回的状态令牌重新发起请求。
+
+```text
+第一次请求 → Server 返回 input_required 和 requestState
+    ↓
+Host 收集用户输入
+    ↓
+第二次请求携带 inputResponses 和 requestState
+    ↓
+Server 继续处理 → 返回结果
+```
+
+第一次协议请求已经返回，整个工具交互仍在进行。`input_required` 是协议定义的结构，与服务端自定义的普通文本结果不同。PI Harness 当前没有接入这套现代协议交互流程。[MCP TypeScript SDK 多轮请求说明](https://ts.sdk.modelcontextprotocol.io/v2/migration/support-2026-07-28)
+
+### 后续调用怎样找到之前的操作
+
+普通结果要求用户确认时，服务端可能返回 `operationId` 并将待确认操作保存在自己的存储中。后续调用传回该标识和用户答复，即使 Client 已重新创建，也可能找到原操作。操作是否有效、账号是否匹配，以及使用哪个工具继续，都由服务端定义。
+
+如果服务端只在某个连接的内存里保存状态，后续可能依赖同一个 MCP 会话。连接被回收、服务重启或状态过期后，原操作可能无法继续。复用 Client 可以保留仍然有效的通信关系，却不能保证服务端保留了业务状态。
+
+PI Harness 的 Session ID 用来标识项目对话。支持有状态 Streamable HTTP 的服务可能另外使用 MCP Session ID 关联协议请求；服务自己也可能提供 `operationId` 等业务标识。这些标识的职责不同，不能互相替代。无状态 MCP 连接同样可以借助服务端保存的业务标识继续操作，前提是服务提供并支持这种约定。MRTR 的 `requestState` 则属于协议定义的续接信息，支持该协议的 Client 需要将它原样传回。
+
+项目自己的工具审批发生在 `beforeToolCall` 阶段。需要审批时，Agent 会等待用户决定，批准后才执行 MCP 工具并发送 `callTool`。这时本次工具调用尚未结束，通常也还没有开始执行服务端工具。拒绝、超时或中止时则不会继续发送这次调用。
 
 ## 审批与连接信任
 

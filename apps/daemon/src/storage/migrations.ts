@@ -538,4 +538,55 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
       CREATE INDEX board_tasks_session_idx ON board_tasks(session_id);
     `,
   },
+  {
+    version: "026-dreaming.sql",
+    sql: `
+      CREATE TABLE memory_revisions (
+        memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        content TEXT NOT NULL,
+        applicability TEXT,
+        evidence_status TEXT NOT NULL CHECK (evidence_status IN
+          ('user_stated', 'practiced', 'unverified', 'conflicted', 'superseded')),
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (memory_id, revision)
+      ) STRICT;
+
+      CREATE TABLE memory_revision_sources (
+        memory_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        run_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        event_seq INTEGER NOT NULL CHECK (event_seq > 0),
+        PRIMARY KEY (memory_id, revision, session_id, run_id, event_id),
+        FOREIGN KEY (memory_id, revision)
+          REFERENCES memory_revisions(memory_id, revision) ON DELETE CASCADE
+      ) STRICT;
+      CREATE INDEX memory_revision_sources_session_idx ON memory_revision_sources(session_id);
+
+      CREATE TABLE dreaming_wiki (
+        workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+        directory_id TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+
+      CREATE TABLE dreaming_runs (
+        run_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        start_generation INTEGER NOT NULL CHECK (start_generation > 0),
+        status TEXT NOT NULL CHECK (status IN ('waiting', 'pending', 'analyzing',
+          'pending_consolidation', 'consolidating', 'completed', 'no_candidates', 'failed', 'skipped')),
+        candidates_json TEXT CHECK (candidates_json IS NULL OR json_valid(candidates_json)),
+        started_at INTEGER NOT NULL,
+        finished_at INTEGER,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX dreaming_runs_status_session_idx ON dreaming_runs(status, session_id, started_at);
+
+      INSERT INTO app_settings (key, value, updated_at)
+      VALUES ('dreaming_generation', '1', 0);
+    `,
+  },
 ];

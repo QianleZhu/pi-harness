@@ -20,6 +20,7 @@ import { ApprovalPolicy, type ApprovalPolicyValue, isApprovalPolicy } from "@pi-
 import { isPlainObject } from "es-toolkit";
 import { FileOpenMode, type FileOpenMode as FileOpenModeValue } from "../schemas/file-open.js";
 import { type BoardTaskRepository, SqliteBoardTaskRepository } from "./board-task-repository.js";
+import { SqliteDreamingRepository } from "./dreaming-repository.js";
 import { type McpServerRepository, SqliteMcpServerRepository } from "./mcp-server-repository.js";
 import { SqliteMemoryRepository } from "./memory-repository.js";
 import { DATABASE_MIGRATIONS } from "./migrations.js";
@@ -1137,6 +1138,7 @@ class SqliteWorkspaceRepository implements WorkspaceRepository {
 }
 
 export interface HarnessDatabase {
+  dreaming: SqliteDreamingRepository;
   boardTasks: BoardTaskRepository;
   mcpServers: McpServerRepository;
   memories: SqliteMemoryRepository;
@@ -1157,6 +1159,7 @@ export function openHarnessDatabase(databasePath: string): HarnessDatabase {
   runMigrations(database);
 
   return {
+    dreaming: new SqliteDreamingRepository(database),
     boardTasks: new SqliteBoardTaskRepository(database),
     mcpServers: new SqliteMcpServerRepository(database),
     memories: new SqliteMemoryRepository(database),

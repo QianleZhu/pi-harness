@@ -1,4 +1,5 @@
 export * from "./contract.js";
+export * from "./dreaming.js";
 export {
   getDefaultMemorySettings,
   type MemoryEmbedder,

@@ -28,6 +28,7 @@ export {
   type StartSessionRunInput,
 } from "./agent-manager.js";
 export type { WorkspaceAgentContext } from "./context/workspace-agent-context.js";
+export { createAgent } from "./create-agent.js";
 export {
   ApprovalDecision,
   type ApprovalDecision as ApprovalDecisionValue,

@@ -1,3 +1,5 @@
+import type { MemoryEmbedding } from "./memory-service.js";
+
 // Dreaming 保存的记忆版本及其证据状态。
 export const MemoryEvidenceStatus = {
   USER_STATED: "user_stated",
@@ -25,6 +27,27 @@ export interface MemoryRevisionSource {
   eventId: string;
   eventSeq: number;
 }
+
+// Run 分析结果与待发布记忆变化。
+export interface DreamingCandidate {
+  content: string;
+  applicability: string | null;
+  evidence: string;
+  sources: { eventId: string; eventSeq: number }[];
+}
+
+export interface DreamingMemoryChange {
+  memoryId: string;
+  expectedRevision: number | null;
+  content: string;
+  applicability: string | null;
+  evidenceStatus: MemoryEvidenceStatus;
+  sources: Omit<MemoryRevisionSource, "memoryId" | "revision">[];
+  embedding?: MemoryEmbedding | null;
+}
+
+// Wiki 草案只接受单层 Markdown 文件名。
+export const DREAMING_WIKI_NAME_PATTERN = /^(?:index|context|[a-z0-9][a-z0-9_-]{0,63})\.md$/;
 
 // 一个 Run 在 Dreaming 工作流中的状态。
 export const DreamingRunStatus = {

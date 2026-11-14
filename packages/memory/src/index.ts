@@ -14,3 +14,6 @@ export {
   type VisibleMemoryEmbedding,
 } from "./memory-service.js";
 export { createMemoryToolRegistrations, type MemoryToolRegistration } from "./memory-tools.js";
+export { DREAMING_ANALYSIS_PROMPT } from "./prompts/dreaming-analysis-prompt.js";
+export { DREAMING_CONSOLIDATION_PROMPT } from "./prompts/dreaming-consolidation-prompt.js";
+export { createDreamingTools } from "./tools/dreaming-tools.js";

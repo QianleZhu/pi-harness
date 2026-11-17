@@ -1155,6 +1155,8 @@ export function openHarnessDatabase(databasePath: string): HarnessDatabase {
   mkdirSync(dirname(databasePath), { mode: 0o700, recursive: true });
   const database = new DatabaseSync(databasePath);
   database.exec("PRAGMA foreign_keys = ON");
+  // daemon 与 Dreaming Worker 共用数据库，短暂写锁等待避免直接失败。
+  database.exec("PRAGMA busy_timeout = 5000");
   database.exec("PRAGMA journal_mode = WAL");
   runMigrations(database);
 

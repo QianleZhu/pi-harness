@@ -1,5 +1,6 @@
-import { readdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import type { Dirent } from "node:fs";
+import { readdir, readFile, rm } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import {
   DREAMING_WIKI_NAME_PATTERN,
   type DreamingMemoryChange,
@@ -10,6 +11,38 @@ import type { SqliteMemoryRepository } from "../storage/memory-repository.js";
 
 export const ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const REFERENCE_PATTERN = /\[memory:([0-9a-f-]{36})@(\d+)\]/gi;
+
+// 清理数据库没有引用的 Wiki 目录，已发布目录保持可读。
+export async function cleanupDreamingDirectories(
+  root: string,
+  dreaming: SqliteDreamingRepository,
+): Promise<void> {
+  const base = resolve(root, "dreaming");
+  let workspaces: Dirent[];
+  try {
+    workspaces = await readdir(base, { withFileTypes: true });
+  } catch (error: unknown) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+    throw error;
+  }
+  for (const workspace of workspaces) {
+    if (!workspace.isDirectory() || !ID_PATTERN.test(workspace.name)) continue;
+    const workspacePath = join(base, workspace.name);
+    const current = dreaming.findWiki(workspace.name)?.directoryId;
+    for (const directory of await readdir(workspacePath, { withFileTypes: true })) {
+      if (
+        !directory.isDirectory() ||
+        !ID_PATTERN.test(directory.name) ||
+        directory.name === current
+      )
+        continue;
+      const target = resolve(workspacePath, directory.name);
+      if (target !== join(workspacePath, directory.name))
+        throw new Error("Invalid Dreaming directory");
+      await rm(target, { recursive: true, force: true });
+    }
+  }
+}
 
 // 读取当前发布的 Wiki，整理时在内存中维护完整草案。
 export async function readWiki(directory: string | null): Promise<Map<string, string>> {

@@ -14,7 +14,7 @@ import type { SessionRepository } from "../storage/database.js";
 import type { SqliteDreamingRepository } from "../storage/dreaming-repository.js";
 import type { SqliteMemoryRepository } from "../storage/memory-repository.js";
 import type { SessionEventStore } from "../storage/session-event-store.js";
-import { textData } from "../utils/dreaming-analysis.js";
+import { readStoredCandidates, textData } from "../utils/dreaming-analysis.js";
 import { ID_PATTERN, readWiki, validateWiki } from "../utils/dreaming-wiki.js";
 import { DreamingAnalysisService } from "./dreaming-analysis-service.js";
 import type { ProviderService } from "./provider-service.js";
@@ -35,8 +35,8 @@ export class DreamingService {
     this.analysis = new DreamingAnalysisService(sessions, events, providers);
   }
 
-  // 处理已登记的待分析 Run；模型不可用时保持原状态。
-  public async processRun(input: {
+  // 提取单个 Run 的候选，并在进入整理队列前持久化。
+  public async analyzeRun(input: {
     workspaceId: string;
     sessionId: string;
     runId: string;
@@ -55,30 +55,87 @@ export class DreamingService {
     if (!ID_PATTERN.test(input.workspaceId)) throw new Error("Invalid workspace ID");
     const resolved = await this.providers.resolveRunModel(input.providerId, input.modelId);
     const signal = input.signal
-      ? AbortSignal.any([input.signal, AbortSignal.timeout(300_000)])
-      : AbortSignal.timeout(300_000);
+      ? AbortSignal.any([input.signal, AbortSignal.timeout(120_000)])
+      : AbortSignal.timeout(120_000);
     signal.throwIfAborted();
-    let directory: string | null = null;
-    let published = false;
+    const settings = this.memories.getSettings();
+    if (!settings.useMemories || !settings.generateMemories)
+      throw new Error("Dreaming learning is disabled");
     if (!this.dreaming.claimRun(input.runId, Date.now()))
       throw new Error("Dreaming run already claimed");
     try {
       const candidates = await this.analysis.analyze({ ...input, signal }, resolved);
-      if (candidates.length === 0) {
-        this.dreaming.saveRun({
-          ...run,
-          status: DreamingRunStatus.NO_CANDIDATES,
-          candidatesJson: null,
-          updatedAt: Date.now(),
-        });
-        return;
-      }
       this.dreaming.saveRun({
         ...run,
-        status: DreamingRunStatus.PENDING_CONSOLIDATION,
-        candidatesJson: JSON.stringify(candidates),
+        status: candidates.length
+          ? DreamingRunStatus.PENDING_CONSOLIDATION
+          : DreamingRunStatus.NO_CANDIDATES,
+        candidatesJson: candidates.length ? JSON.stringify(candidates) : null,
         updatedAt: Date.now(),
       });
+    } catch (error: unknown) {
+      this.dreaming.saveRun({
+        ...run,
+        status: DreamingRunStatus.FAILED,
+        candidatesJson: null,
+        updatedAt: Date.now(),
+      });
+      throw error;
+    }
+  }
+
+  // 同一工作区的一到两个 Run 共用整理草案并原子发布。
+  public async consolidateRuns(input: {
+    workspaceId: string;
+    runIds: readonly string[];
+    providerId: string;
+    modelId: string;
+    signal?: AbortSignal;
+  }): Promise<void> {
+    const runIds = input.runIds;
+    if (
+      runIds.length < 1 ||
+      runIds.length > 2 ||
+      new Set(runIds).size !== runIds.length ||
+      !ID_PATTERN.test(input.workspaceId)
+    )
+      throw new Error("Invalid Dreaming batch");
+    const runs = runIds.map((id) => this.dreaming.findRun(id));
+    if (
+      runs.some(
+        (run) =>
+          !run ||
+          run.workspaceId !== input.workspaceId ||
+          run.status !== DreamingRunStatus.PENDING_CONSOLIDATION ||
+          run.candidatesJson === null,
+      )
+    )
+      throw new Error("Dreaming batch is not pending");
+    const first = runs[0];
+    if (!first) throw new Error("Dreaming batch is empty");
+    const resolved = await this.providers.resolveRunModel(input.providerId, input.modelId);
+    const signal = input.signal
+      ? AbortSignal.any([input.signal, AbortSignal.timeout(300_000)])
+      : AbortSignal.timeout(300_000);
+    signal.throwIfAborted();
+    if (!this.dreaming.claimConsolidation(runIds, Date.now()))
+      throw new Error("Dreaming batch already claimed");
+    let directory: string | null = null;
+    let published = false;
+    const toolInput = {
+      workspaceId: input.workspaceId,
+      sessionId: first.sessionId,
+      runId: first.runId,
+    };
+    try {
+      const groups = runs.map((run) => {
+        if (!run?.candidatesJson) throw new Error("Dreaming candidates missing");
+        return { run, candidates: readStoredCandidates(run.candidatesJson) };
+      });
+      const candidates = groups.flatMap((group) => group.candidates);
+      const candidateRuns = groups.flatMap((group) =>
+        group.candidates.map(() => ({ sessionId: group.run.sessionId, runId: group.run.runId })),
+      );
       const currentWiki = this.dreaming.findWiki(input.workspaceId);
       if (currentWiki && !ID_PATTERN.test(currentWiki.directoryId))
         throw new Error("Invalid Wiki directory");
@@ -89,9 +146,10 @@ export class DreamingService {
       const changes: DreamingMemoryChange[] = [];
       let abortAgent = () => {};
       const tools = createDreamingTools({
-        input,
+        input: toolInput,
         signal,
         candidates,
+        candidateRuns,
         files,
         changes,
         sessions: this.sessions,
@@ -101,12 +159,6 @@ export class DreamingService {
         dreaming: this.dreaming,
         projectEventData: textData,
         onLimit: () => abortAgent(),
-      });
-      this.dreaming.saveRun({
-        ...run,
-        status: DreamingRunStatus.CONSOLIDATING,
-        candidatesJson: JSON.stringify(candidates),
-        updatedAt: Date.now(),
       });
       const agent = createAgent({
         messages: [],
@@ -166,7 +218,8 @@ export class DreamingService {
       this.dreaming.publish({
         workspaceId: input.workspaceId,
         directoryId,
-        runId: input.runId,
+        runId: first.runId,
+        runIds,
         changes,
         references,
         expectedDirectoryId: currentWiki?.directoryId ?? null,
@@ -177,15 +230,31 @@ export class DreamingService {
         await rm(join(workspaceDir, currentWiki.directoryId), { recursive: true, force: true });
     } catch (error: unknown) {
       if (!published) {
-        this.dreaming.saveRun({
-          ...run,
-          status: DreamingRunStatus.FAILED,
-          candidatesJson: null,
-          updatedAt: Date.now(),
-        });
+        this.dreaming.failConsolidation(runIds, Date.now());
         if (directory) await rm(directory, { recursive: true, force: true });
       }
       throw error;
+    }
+  }
+
+  // 为内部调用保留单 Run 的完整整理入口。
+  public async processRun(input: {
+    workspaceId: string;
+    sessionId: string;
+    runId: string;
+    providerId: string;
+    modelId: string;
+    signal?: AbortSignal;
+  }): Promise<void> {
+    await this.analyzeRun(input);
+    if (this.dreaming.findRun(input.runId)?.status === DreamingRunStatus.PENDING_CONSOLIDATION) {
+      await this.consolidateRuns({
+        workspaceId: input.workspaceId,
+        runIds: [input.runId],
+        providerId: input.providerId,
+        modelId: input.modelId,
+        ...(input.signal ? { signal: input.signal } : {}),
+      });
     }
   }
 }

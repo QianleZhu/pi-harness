@@ -83,7 +83,8 @@ export function ModelSettingsPanel() {
     ModelProvider | undefined
   >({
     mutationFn: ({ enabled, providerId }) => updateProvider(providerId, { enabled }),
-    onError: (_error, _variables, previousProvider) => {
+    onError: (error, _variables, previousProvider) => {
+      toast.danger(error.message);
       if (!previousProvider) return;
       queryClient.setQueryData<readonly ModelProvider[]>(providerQueryKeys.all, (current) =>
         current?.map((provider) =>
@@ -232,14 +233,6 @@ export function ModelSettingsPanel() {
             </Card>
           ))}
         </div>
-      ) : null}
-
-      {enabledMutation.isError ? (
-        <Card className="mt-4" variant="secondary">
-          <Card.Content className="text-sm text-danger">
-            {enabledMutation.error.message}
-          </Card.Content>
-        </Card>
       ) : null}
 
       <div className="mt-4 flex flex-col gap-3">

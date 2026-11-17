@@ -61,6 +61,170 @@ export class SqliteDreamingRepository {
     return generation;
   }
 
+  // 读取独立 Dreaming 模型；未配置时调度器保持待处理状态。
+  public getModel(): { providerId: string; modelId: string } | null {
+    const row = this.database
+      .prepare("SELECT value FROM app_settings WHERE key = 'dreaming_model'")
+      .get();
+    if (!row) return null;
+    if (typeof row.value !== "string") throw new Error("Invalid Dreaming model setting");
+    const value: unknown = JSON.parse(row.value);
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      !("providerId" in value) ||
+      !("modelId" in value) ||
+      typeof value.providerId !== "string" ||
+      !value.providerId ||
+      typeof value.modelId !== "string" ||
+      !value.modelId
+    ) {
+      throw new Error("Invalid Dreaming model setting");
+    }
+    return { providerId: value.providerId, modelId: value.modelId };
+  }
+
+  // 在 Run 开始时记录启用代次，供结束时判断是否跨越开关边界。
+  public recordRunStart(input: {
+    runId: string;
+    workspaceId: string;
+    sessionId: string;
+    timestamp: number;
+  }): void {
+    const settings = this.database.prepare("SELECT key, value FROM memory_settings").all();
+    const enabled = (key: string) => settings.find((row) => row.key === key)?.value !== 0;
+    if (!enabled("use_memories") || !enabled("generate_memories")) return;
+    this.database
+      .prepare(`INSERT OR IGNORE INTO dreaming_runs
+      (run_id, workspace_id, session_id, start_generation, status, candidates_json, started_at, finished_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, NULL, ?, NULL, ?)`)
+      .run(
+        input.runId,
+        input.workspaceId,
+        input.sessionId,
+        this.getGeneration(),
+        RunStatus.WAITING,
+        input.timestamp,
+        input.timestamp,
+      );
+  }
+
+  // Run 结束时只接收在同一开启代次内完成的工作。
+  public recordRunEnd(runId: string, timestamp: number): void {
+    const run = this.findRun(runId);
+    if (!run || run.status !== RunStatus.WAITING) return;
+    const settings = this.database.prepare("SELECT key, value FROM memory_settings").all();
+    const enabled = (key: string) => settings.find((row) => row.key === key)?.value !== 0;
+    const isEligible =
+      enabled("use_memories") &&
+      enabled("generate_memories") &&
+      run.startGeneration === this.getGeneration();
+    this.database
+      .prepare(
+        "UPDATE dreaming_runs SET status = ?, finished_at = ?, updated_at = ? WHERE run_id = ? AND status = ?",
+      )
+      .run(
+        isEligible ? RunStatus.PENDING : RunStatus.SKIPPED,
+        timestamp,
+        timestamp,
+        runId,
+        RunStatus.WAITING,
+      );
+  }
+
+  // 获取尚未开始分析的 Run，按启动顺序供调度使用。
+  public listPendingRuns(): DreamingRunRecord[] {
+    const rows = this.database
+      .prepare("SELECT run_id FROM dreaming_runs WHERE status = ? ORDER BY started_at, run_id")
+      .all(RunStatus.PENDING);
+    return rows.flatMap((row) => {
+      const run = this.findRun(String(row.run_id));
+      return run ? [run] : [];
+    });
+  }
+
+  // 读取等待整理的候选，按完成时间组成工作区批次。
+  public listPendingConsolidation(): DreamingRunRecord[] {
+    const rows = this.database
+      .prepare(
+        "SELECT run_id FROM dreaming_runs WHERE status = ? ORDER BY workspace_id, updated_at, run_id",
+      )
+      .all(RunStatus.PENDING_CONSOLIDATION);
+    return rows.flatMap((row) => {
+      const run = this.findRun(String(row.run_id));
+      return run ? [run] : [];
+    });
+  }
+
+  // 同一事务领取本批 Run，避免部分候选被重复整理。
+  public claimConsolidation(runIds: readonly string[], updatedAt: number): boolean {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const update = this.database.prepare(
+        "UPDATE dreaming_runs SET status = ?, updated_at = ? WHERE run_id = ? AND status = ?",
+      );
+      for (const runId of runIds) {
+        if (
+          update.run(RunStatus.CONSOLIDATING, updatedAt, runId, RunStatus.PENDING_CONSOLIDATION)
+            .changes !== 1
+        ) {
+          this.database.exec("ROLLBACK");
+          return false;
+        }
+      }
+      this.database.exec("COMMIT");
+      return true;
+    } catch (error: unknown) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  // 本批整理失败时同步清除候选并终结所有 Run。
+  public failConsolidation(runIds: readonly string[], updatedAt: number): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const update = this.database.prepare(
+        "UPDATE dreaming_runs SET status = ?, candidates_json = NULL, updated_at = ? WHERE run_id = ? AND status = ?",
+      );
+      for (const runId of runIds)
+        update.run(RunStatus.FAILED, updatedAt, runId, RunStatus.CONSOLIDATING);
+      this.database.exec("COMMIT");
+    } catch (error: unknown) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  // 查询尚未观察到结束事件的 Run，供启动恢复核对 JSONL。
+  public listWaitingRuns(): DreamingRunRecord[] {
+    const rows = this.database
+      .prepare("SELECT run_id FROM dreaming_runs WHERE status = ?")
+      .all(RunStatus.WAITING);
+    return rows.flatMap((row) => {
+      const run = this.findRun(String(row.run_id));
+      return run ? [run] : [];
+    });
+  }
+
+  // 标记无法在 Session JSONL 中恢复的 Run。
+  public skipWaitingRun(runId: string, updatedAt: number): void {
+    this.database
+      .prepare(
+        "UPDATE dreaming_runs SET status = ?, updated_at = ? WHERE run_id = ? AND status = ?",
+      )
+      .run(RunStatus.SKIPPED, updatedAt, runId, RunStatus.WAITING);
+  }
+
+  // 重启时终结中断的后台调用，未开始的分析仍保留待调度状态。
+  public failInterrupted(updatedAt: number): void {
+    this.database
+      .prepare(
+        "UPDATE dreaming_runs SET status = ?, candidates_json = NULL, updated_at = ? WHERE status IN (?, ?)",
+      )
+      .run(RunStatus.FAILED, updatedAt, RunStatus.ANALYZING, RunStatus.CONSOLIDATING);
+  }
+
   // 写入新的记忆版本，不覆盖已有版本。
   public createRevision(revision: MemoryRevision): void {
     this.database
@@ -192,6 +356,7 @@ export class SqliteDreamingRepository {
     workspaceId: string;
     directoryId: string;
     runId: string;
+    runIds?: readonly string[];
     changes: DreamingMemoryChange[];
     references?: { memoryId: string; revision: number; isCurrent: boolean }[];
     expectedDirectoryId: string | null;
@@ -202,6 +367,23 @@ export class SqliteDreamingRepository {
       const run = this.findRun(input.runId);
       if (!run || run.workspaceId !== input.workspaceId || run.status !== RunStatus.CONSOLIDATING) {
         throw new Error("Dreaming run is not ready to publish");
+      }
+      const runIds = input.runIds ?? [input.runId];
+      if (
+        runIds.length < 1 ||
+        runIds.length > 2 ||
+        !runIds.includes(input.runId) ||
+        new Set(runIds).size !== runIds.length
+      )
+        throw new Error("Invalid Dreaming batch");
+      for (const id of runIds) {
+        const item = this.findRun(id);
+        if (
+          !item ||
+          item.workspaceId !== input.workspaceId ||
+          item.status !== RunStatus.CONSOLIDATING
+        )
+          throw new Error("Dreaming batch is not ready to publish");
       }
       if ((this.findWiki(input.workspaceId)?.directoryId ?? null) !== input.expectedDirectoryId) {
         throw new Error("Dreaming Wiki changed");
@@ -240,7 +422,7 @@ export class SqliteDreamingRepository {
               content,
               normalized,
               input.workspaceId,
-              run.sessionId,
+              change.sources[0]?.sessionId ?? run.sessionId,
               input.now,
               input.now,
             );
@@ -347,12 +529,13 @@ export class SqliteDreamingRepository {
         directoryId: input.directoryId,
         updatedAt: input.now,
       });
-      this.saveRun({
-        ...run,
-        status: RunStatus.COMPLETED,
-        candidatesJson: null,
-        updatedAt: input.now,
-      });
+      for (const id of runIds) {
+        this.database
+          .prepare(
+            "UPDATE dreaming_runs SET status = ?, candidates_json = NULL, updated_at = ? WHERE run_id = ?",
+          )
+          .run(RunStatus.COMPLETED, input.now, id);
+      }
       this.database.exec("COMMIT");
     } catch (error: unknown) {
       this.database.exec("ROLLBACK");

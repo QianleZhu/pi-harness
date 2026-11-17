@@ -110,6 +110,7 @@ if (process.platform !== "win32") {
 
 for (const requiredPath of [
   join(daemonRoot, "src", "bootstrap.ts"),
+  join(daemonRoot, "src", "workers", "dreaming-worker.ts"),
   desktopOAuthPath,
   join(daemonRoot, "node_modules", "tsx"),
   join(workspaceRoot, "apps", "web", "dist", "index.html"),

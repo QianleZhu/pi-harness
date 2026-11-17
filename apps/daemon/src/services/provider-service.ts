@@ -323,18 +323,37 @@ export class ProviderService {
   private readonly builtInIds = new Set(BUILT_IN_PROVIDER_IDS);
   private readonly mutatingProviderIds = new Set<string>();
   private readonly oauthSessions = new Map<string, ProviderOAuthSession>();
+  private onAvailabilityChanged: () => void = () => {};
 
   private constructor(
     private readonly settings: ProviderSettingRepository,
     private readonly credentials: CredentialStore,
     private readonly models: MutableModels,
     private readonly isProviderInUse: (providerId: string) => boolean,
+    private readonly isDreamingActive: () => boolean,
   ) {}
+
+  // Provider 或认证状态变化时唤醒后台任务。
+  public setAvailabilityObserver(observer: () => void): void {
+    this.onAvailabilityChanged = observer;
+  }
+
+  // 同步持久化的自定义 Provider，供独立进程重新读取配置。
+  public refreshCustomProviders(): void {
+    const custom = this.settings.listCustom();
+    const ids = new Set(custom.map((provider) => provider.id));
+    for (const provider of this.models.getProviders()) {
+      if (provider.id.startsWith("custom:") && !ids.has(provider.id))
+        this.models.deleteProvider(provider.id);
+    }
+    for (const provider of custom) this.models.setProvider(createCustomProvider(provider));
+  }
 
   public static async create(
     settings: ProviderSettingRepository,
     credentials: CredentialStore,
     isProviderInUse: (providerId: string) => boolean = () => false,
+    isDreamingActive: () => boolean = () => false,
   ): Promise<ProviderService> {
     const builtIns = await Promise.all(BUILT_IN_PROVIDER_IDS.map(loadBuiltInProvider));
     const custom = settings.listCustom().map(createCustomProvider);
@@ -343,6 +362,7 @@ export class ProviderService {
       credentials,
       createHarnessModels([...builtIns, ...custom], credentials),
       isProviderInUse,
+      isDreamingActive,
     );
   }
 
@@ -385,6 +405,7 @@ export class ProviderService {
   }
 
   public async createProvider(input: CreateProviderDto): Promise<ProviderVo> {
+    this.assertDreamingNotActive();
     const now = Date.now();
     const record: CustomProviderRecord = {
       baseUrl: validateBaseUrl(input.baseUrl),
@@ -399,6 +420,7 @@ export class ProviderService {
     };
     this.settings.createCustom(record);
     this.models.setProvider(createCustomProvider(record));
+    this.onAvailabilityChanged();
     const provider = (await this.list()).find((item) => item.id === record.id);
     if (!provider) throw new ProviderServiceError(ProviderErrorCode.NOT_FOUND, "Provider 创建失败");
     return provider;
@@ -434,6 +456,7 @@ export class ProviderService {
       this.models.setProvider(createCustomProvider(next));
     }
 
+    this.onAvailabilityChanged();
     const provider = (await this.list()).find((item) => item.id === providerId);
     if (!provider) this.throwNotFound();
     return provider;
@@ -704,14 +727,26 @@ export class ProviderService {
       };
     } finally {
       session.controller.abort();
+      this.onAvailabilityChanged();
     }
   }
 
   private assertProviderNotInUse(providerId: string): void {
+    this.assertDreamingNotActive();
     if (this.isProviderInUse(providerId) || this.mutatingProviderIds.has(providerId)) {
       throw new ProviderServiceError(
         ProviderErrorCode.IN_USE,
         "Provider 正被活动会话使用，请等待运行结束后重试",
+      );
+    }
+  }
+
+  // 整理任务运行时冻结 Provider 配置，避免刷新正在使用的模型。
+  private assertDreamingNotActive(): void {
+    if (this.isDreamingActive()) {
+      throw new ProviderServiceError(
+        ProviderErrorCode.IN_USE,
+        "Dreaming 正在执行，请等待完成后再修改 Provider 配置",
       );
     }
   }
@@ -737,6 +772,7 @@ export class ProviderService {
       return await operation();
     } finally {
       this.mutatingProviderIds.delete(providerId);
+      this.onAvailabilityChanged();
     }
   }
 

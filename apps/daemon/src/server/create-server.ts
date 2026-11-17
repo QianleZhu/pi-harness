@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
-import { AgentManager } from "@pi-harness/agent-runtime";
+import { AgentManager, HarnessEventType } from "@pi-harness/agent-runtime";
 import { MemoryService } from "@pi-harness/memory";
 import { ApprovalPolicy } from "@pi-harness/policy";
 import { AVAILABLE_PLUGINS, resolveRegisteredPluginSkills } from "@pi-harness/tools";
@@ -25,6 +25,7 @@ import { registerWorkspaceRoutes } from "../routes/workspace-routes.js";
 import { AppSettingsService } from "../services/app-settings-service.js";
 import { BoardTaskService } from "../services/board-task-service.js";
 import { ComputerUsePermissionService } from "../services/computer-use-permission-service.js";
+import { DreamingWorkerHost } from "../services/dreaming-worker-host.js";
 import { FileOpenService } from "../services/file-open-service.js";
 import { HumanInteractionService } from "../services/human-interaction-service.js";
 import { LocalMemoryEmbedder } from "../services/local-memory-embedder.js";
@@ -144,6 +145,29 @@ export async function createServer(config: HarnessConfig = loadHarnessConfig()) 
   const broker = new SessionEventBroker();
   const boardTasks = new BoardTaskService(database.boardTasks, database.workspaces, eventStore);
   const sessionEvents = new SessionEventService(database.sessions, eventStore, broker, boardTasks);
+  let dreamingWorker: DreamingWorkerHost | undefined;
+  // Run 开始在事件写入前登记，结束在 JSONL 持久化后进入待分析状态。
+  sessionEvents.setRunLifecycleObserver((event, phase) => {
+    if (!event.runId) return;
+    if (phase === "before" && event.type === HarnessEventType.RUN_STARTED) {
+      const session = database.sessions.find(event.sessionId);
+      if (!session) throw new Error("Dreaming session not found");
+      database.dreaming.recordRunStart({
+        runId: event.runId,
+        workspaceId: session.workspaceId,
+        sessionId: event.sessionId,
+        timestamp: event.timestamp,
+      });
+    }
+    if (
+      phase === "after" &&
+      (event.type === HarnessEventType.RUN_COMPLETED ||
+        event.type === HarnessEventType.RUN_FAILED ||
+        event.type === HarnessEventType.RUN_ABORTED)
+    ) {
+      database.dreaming.recordRunEnd(event.runId, event.timestamp);
+    }
+  });
   await sessionEvents.recoverInterruptedRuns();
   const interactions = new HumanInteractionService();
   const getRegisteredGlobalSkills = () =>
@@ -164,8 +188,11 @@ export async function createServer(config: HarnessConfig = loadHarnessConfig()) 
     credentials,
     (providerId) =>
       (agents?.isProviderActive(providerId) ?? false) ||
-      (sessions?.isProviderActive(providerId) ?? false),
+      (sessions?.isProviderActive(providerId) ?? false) ||
+      (dreamingWorker?.isProviderActive(providerId) ?? false),
+    () => dreamingWorker?.isActive() ?? false,
   );
+  providers.setAvailabilityObserver(() => dreamingWorker?.providersChanged());
   const localMemoryEmbedder = new LocalMemoryEmbedder(config.globalRoot);
   const memories = new MemoryService(database.memories, {
     modelId: localMemoryEmbedder.modelId,
@@ -222,6 +249,25 @@ export async function createServer(config: HarnessConfig = loadHarnessConfig()) 
     },
     protectedPaths,
   );
+  dreamingWorker = new DreamingWorkerHost(
+    {
+      databasePath: config.databasePath,
+      sessionsPath: config.sessionsPath,
+      globalRoot: config.globalRoot,
+    },
+    credentials,
+    (sessionId) => sessions?.isSessionActive(sessionId) ?? false,
+    (phase, runIds) => {
+      const runs = runIds.flatMap((runId) => {
+        const run = database.dreaming.findRun(runId);
+        return run
+          ? [{ runId, sessionId: run.sessionId, workspaceId: run.workspaceId }]
+          : [{ runId }];
+      });
+      server.log.warn({ code: "DREAMING_FAILED", phase, runs }, "Dreaming background task failed");
+    },
+  );
+  dreamingWorker.start();
   await sessions.initializeSearchIndex();
   const allowedHosts = new Set([
     new URL(config.webUrl).host,
@@ -269,6 +315,7 @@ export async function createServer(config: HarnessConfig = loadHarnessConfig()) 
     fileOpen.close();
     computerUsePermissions.close();
     workspaces.close();
+    await dreamingWorker.close();
     await sessions.close();
     await mcpServers.close();
     await mcpClients.close();

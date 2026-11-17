@@ -380,11 +380,32 @@ export class MemoryService implements MemoryRuntime {
     limit = 20,
     signal?: AbortSignal,
   ): Promise<readonly MemoryRecord[]> {
+    return this.searchInternal(query, workspaceId, limit, signal, true);
+  }
+
+  // 已启动的 Dreaming 整理在学习关闭后仍可读取工作区记忆。
+  public async searchForDreaming(
+    query: string,
+    workspaceId: string,
+    limit = 20,
+    signal?: AbortSignal,
+  ): Promise<readonly MemoryRecord[]> {
+    return this.searchInternal(query, workspaceId, limit, signal, false);
+  }
+
+  // 统一执行关键词与向量混合召回。
+  private async searchInternal(
+    query: string,
+    workspaceId: string,
+    limit: number,
+    signal: AbortSignal | undefined,
+    requireMemoryUse: boolean,
+  ): Promise<readonly MemoryRecord[]> {
     const normalizedQuery = query.trim();
     if (!normalizedQuery) throw new MemoryError(MemoryErrorCode.INVALID, "检索内容不能为空");
     this.assertWorkspace(workspaceId);
     const settings = this.repository.getSettings();
-    if (!settings.useMemories) return [];
+    if (requireMemoryUse && !settings.useMemories) return [];
     const resultLimit = Math.min(Math.max(limit, 1), 50);
     const candidateLimit = Math.max(
       MIN_HYBRID_CANDIDATES,

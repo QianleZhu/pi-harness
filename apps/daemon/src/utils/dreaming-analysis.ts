@@ -23,6 +23,27 @@ const AnalysisSchema = Type.Object(
   },
   { additionalProperties: false },
 );
+const StoredCandidateSchema = Type.Object({
+  content: Type.String({ minLength: 1, maxLength: 500 }),
+  applicability: Type.Union([Type.String({ minLength: 1, maxLength: 500 }), Type.Null()]),
+  evidence: Type.String({ minLength: 1, maxLength: 1000 }),
+  sources: Type.Array(
+    Type.Object({
+      eventId: Type.String({ minLength: 1, maxLength: 128 }),
+      eventSeq: Type.Integer({ minimum: 1 }),
+    }),
+    { minItems: 1, maxItems: 30 },
+  ),
+});
+const StoredCandidatesSchema = Type.Array(StoredCandidateSchema, { minItems: 1, maxItems: 30 });
+
+// 恢复已经通过来源校验并持久化的 Run 候选。
+export function readStoredCandidates(value: string): DreamingCandidate[] {
+  const parsed: unknown = JSON.parse(value);
+  if (!Value.Check(StoredCandidatesSchema, parsed))
+    throw new Error("Invalid stored Dreaming candidates");
+  return parsed as DreamingCandidate[];
+}
 
 // 去除图片等非文本内容，仅保留可分析的文本及工具参数。
 export function textData(value: unknown): unknown {

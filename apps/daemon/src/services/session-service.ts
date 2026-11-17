@@ -284,6 +284,11 @@ export class SessionService {
     }));
   }
 
+  // 检查会话是否正在执行 Run 或其他需要独占的操作。
+  public isSessionActive(sessionId: SessionId): boolean {
+    return this.activeSessionIds.has(sessionId) || this.agents.isSessionActive(sessionId);
+  }
+
   public async getUsageStatistics(signal: AbortSignal): Promise<readonly UsageStatistic[]> {
     const today = new Date();
     const since = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 364).getTime();

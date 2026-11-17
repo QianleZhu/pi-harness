@@ -161,6 +161,8 @@ function compactRunContextSnapshot(
 /** 按“JSONL → SQLite 索引 → SSE”顺序提交 Runtime 事件。 */
 export class SessionEventService {
   private readonly runContextStateBySession = new Map<SessionId, RecordedRunContextState>();
+  private runLifecycleObserver: ((event: HarnessEvent, phase: "before" | "after") => void) | null =
+    null;
 
   public constructor(
     private readonly sessions: SessionRepository,
@@ -169,13 +171,22 @@ export class SessionEventService {
     private readonly boardTasks: BoardTaskService,
   ) {}
 
+  // 接入后台工作所需的 Run 开始和结束事件。
+  public setRunLifecycleObserver(
+    observer: (event: HarnessEvent, phase: "before" | "after") => void,
+  ): void {
+    this.runLifecycleObserver = observer;
+  }
+
   public handle = async (event: HarnessEvent): Promise<void> => {
     const prepared = compactRunContextSnapshot(
       event,
       this.runContextStateBySession.get(event.sessionId) ?? EMPTY_RUN_CONTEXT_STATE,
     );
     if (shouldPersistSessionEvent(prepared.event)) {
+      this.runLifecycleObserver?.(prepared.event, "before");
       await this.eventStore.append(prepared.event);
+      this.runLifecycleObserver?.(prepared.event, "after");
     }
     this.runContextStateBySession.set(event.sessionId, prepared.state);
 

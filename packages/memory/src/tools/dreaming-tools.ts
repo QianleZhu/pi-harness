@@ -50,6 +50,7 @@ export function createDreamingTools(options: {
   input: { workspaceId: string; sessionId: string; runId: string };
   signal: AbortSignal;
   candidates: DreamingCandidate[];
+  candidateRuns: { sessionId: string; runId: string }[];
   files: Map<string, string>;
   changes: DreamingMemoryChange[];
   sessions: { find(sessionId: string): { workspaceId: string } | null };
@@ -72,6 +73,7 @@ export function createDreamingTools(options: {
     input,
     signal,
     candidates,
+    candidateRuns,
     files,
     changes,
     sessions,
@@ -86,13 +88,16 @@ export function createDreamingTools(options: {
     string,
     { sessionId: string; runId: string; eventId: string; eventSeq: number }
   >();
-  for (const candidate of candidates)
+  for (const [index, candidate] of candidates.entries()) {
+    const origin = candidateRuns[index];
+    if (!origin) throw new Error("Candidate run not found");
     for (const source of candidate.sources)
-      allowed.set(`${input.sessionId}:${source.eventId}`, {
+      allowed.set(`${origin.sessionId}:${source.eventId}`, {
         ...source,
-        sessionId: input.sessionId,
-        runId: input.runId,
+        sessionId: origin.sessionId,
+        runId: origin.runId,
       });
+  }
   let calls = 0;
   const count = () => {
     signal.throwIfAborted();
@@ -112,7 +117,7 @@ export function createDreamingTools(options: {
         count();
         const args = validateToolInput(SearchSchema, value);
         return result(
-          (await memories.search(args.query, input.workspaceId, 20, signal)).filter(
+          (await memories.searchForDreaming(args.query, input.workspaceId, 20, signal)).filter(
             (memory) => memory.workspaceId === input.workspaceId,
           ),
         );
@@ -185,11 +190,12 @@ export function createDreamingTools(options: {
           throw new Error("Memory not found");
         const sources = args.candidateIndexes.flatMap((i) => {
           const candidate = candidates[i];
-          if (!candidate) throw new Error("Candidate not found");
+          const origin = candidateRuns[i];
+          if (!candidate || !origin) throw new Error("Candidate not found");
           return candidate.sources.map((source) => ({
             ...source,
-            sessionId: input.sessionId,
-            runId: input.runId,
+            sessionId: origin.sessionId,
+            runId: origin.runId,
           }));
         });
         const memoryId = memory?.id ?? randomUUID();

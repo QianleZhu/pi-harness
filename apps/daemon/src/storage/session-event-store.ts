@@ -223,7 +223,10 @@ export class SessionEventStore {
   private readonly revisions = new Map<SessionId, number>();
   private readonly writeTails = new Map<SessionId, Promise<void>>();
 
-  public constructor(private readonly directory: string) {}
+  public constructor(
+    private readonly directory: string,
+    private readonly shouldRepairTail = true,
+  ) {}
 
   public async initialize(): Promise<void> {
     await mkdir(this.directory, { mode: 0o700, recursive: true });
@@ -395,8 +398,11 @@ export class SessionEventStore {
       } catch (error: unknown) {
         const isIncompleteLastLine = index === lines.length - 1 && !hasTrailingNewline;
         if (isIncompleteLastLine && error instanceof SyntaxError) {
-          const lastCompleteLineEnd = source.lastIndexOf("\n") + 1;
-          await truncate(path, lastCompleteLineEnd);
+          // 跨进程只读时末行可能仍在追加，只有写入进程可以修复文件。
+          if (this.shouldRepairTail) {
+            const lastCompleteLineEnd = source.lastIndexOf("\n") + 1;
+            await truncate(path, lastCompleteLineEnd);
+          }
           break;
         }
         throw error;

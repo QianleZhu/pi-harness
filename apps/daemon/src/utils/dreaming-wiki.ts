@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import {
   DREAMING_WIKI_NAME_PATTERN,
   type DreamingMemoryChange,
-  MemoryEvidenceStatus,
+  resolveDreamingRevision,
 } from "@pi-harness/memory";
 import type { SqliteDreamingRepository } from "../storage/dreaming-repository.js";
 import type { SqliteMemoryRepository } from "../storage/memory-repository.js";
@@ -28,12 +28,11 @@ export async function cleanupDreamingDirectories(
   for (const workspace of workspaces) {
     if (!workspace.isDirectory() || !ID_PATTERN.test(workspace.name)) continue;
     const workspacePath = join(base, workspace.name);
-    const current = dreaming.findWiki(workspace.name)?.directoryId;
     for (const directory of await readdir(workspacePath, { withFileTypes: true })) {
       if (
         !directory.isDirectory() ||
         !ID_PATTERN.test(directory.name) ||
-        directory.name === current
+        dreaming.hasWikiVersion(workspace.name, directory.name)
       )
         continue;
       const target = resolve(workspacePath, directory.name);
@@ -95,12 +94,8 @@ export function validateWiki(
       if (change) {
         const current = change.expectedRevision === null ? null : memories.find(memoryId);
         const prior = current ? dreaming.findRevision(memoryId, current.revision) : null;
-        const next =
-          current?.content === change.content.trim().replaceAll(/\s+/g, " ") &&
-          (prior?.applicability ?? null) === change.applicability &&
-          (prior?.evidenceStatus ?? MemoryEvidenceStatus.UNVERIFIED) === change.evidenceStatus
-            ? change.expectedRevision
-            : (change.expectedRevision ?? 0) + 1;
+        const priorSources = current ? dreaming.listSources(memoryId, current.revision) : [];
+        const next = resolveDreamingRevision(change, current, prior, priorSources);
         if (revision === next) continue;
       }
       const memory = memories.find(memoryId);

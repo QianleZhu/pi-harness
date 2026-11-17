@@ -10,6 +10,7 @@ export {
   type MemoryRepository,
   type MemoryRuntime,
   MemoryService,
+  type RunMemorySnapshot,
   type StoredMemoryEmbedding,
   type StoredMemoryInput,
   type VisibleMemoryEmbedding,
@@ -18,3 +19,4 @@ export { createMemoryToolRegistrations, type MemoryToolRegistration } from "./me
 export { DREAMING_ANALYSIS_PROMPT } from "./prompts/dreaming-analysis-prompt.js";
 export { DREAMING_CONSOLIDATION_PROMPT } from "./prompts/dreaming-consolidation-prompt.js";
 export { createDreamingTools } from "./tools/dreaming-tools.js";
+export { resolveDreamingRevision } from "./utils/dreaming-revision.js";

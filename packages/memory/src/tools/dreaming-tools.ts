@@ -11,6 +11,7 @@ import {
   type MemoryRevisionSource,
 } from "../dreaming.js";
 import type { MemoryRepository, MemoryService } from "../memory-service.js";
+import { resolveDreamingRevision } from "../utils/dreaming-revision.js";
 
 const EvidenceSchema = Type.Union(
   Object.values(MemoryEvidenceStatus).map((value) => Type.Literal(value)),
@@ -201,24 +202,20 @@ export function createDreamingTools(options: {
         const memoryId = memory?.id ?? randomUUID();
         if (changes.some((item) => item.memoryId === memoryId))
           throw new Error("Memory already drafted");
-        changes.push({
+        const change: DreamingMemoryChange = {
           memoryId,
           expectedRevision: memory?.revision ?? null,
           content: args.content,
           applicability: args.applicability,
           evidenceStatus: args.evidenceStatus,
           sources,
-        });
+        };
+        changes.push(change);
         const prior = memory ? dreaming.findRevision(memory.id, memory.revision) : null;
+        const priorSources = memory ? dreaming.listSources(memory.id, memory.revision) : [];
         return result({
           memoryId,
-          revision:
-            memory &&
-            memory.content === args.content.trim().replaceAll(/\s+/g, " ") &&
-            (prior?.applicability ?? null) === args.applicability &&
-            (prior?.evidenceStatus ?? MemoryEvidenceStatus.UNVERIFIED) === args.evidenceStatus
-              ? memory.revision
-              : (memory?.revision ?? 0) + 1,
+          revision: resolveDreamingRevision(change, memory, prior, priorSources),
         });
       },
     },

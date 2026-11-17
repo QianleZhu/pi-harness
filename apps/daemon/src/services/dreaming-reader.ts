@@ -1,6 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { DREAMING_WIKI_NAME_PATTERN, type DreamingReader } from "@pi-harness/memory";
+import {
+  DREAMING_WIKI_NAME_PATTERN,
+  type DreamingReader,
+  type RunMemorySnapshot,
+} from "@pi-harness/memory";
 import type { SessionRepository } from "../storage/database.js";
 import type { SqliteDreamingRepository } from "../storage/dreaming-repository.js";
 import type { SqliteMemoryRepository } from "../storage/memory-repository.js";
@@ -18,26 +22,34 @@ export class DreamingReaderService implements DreamingReader {
     private readonly events: SessionEventStore,
   ) {}
 
+  // 固定 Run 启动时的 Wiki 与可见记忆版本。
+  public captureSnapshot(workspaceId: string): RunMemorySnapshot {
+    return this.dreaming.captureSnapshot(workspaceId);
+  }
+
   // 只读取数据库指向的当前 Wiki 文件。
   public async readWiki(
     workspaceId: string,
     name: string,
     signal?: AbortSignal,
+    snapshot?: RunMemorySnapshot,
   ): Promise<string | null> {
     if (!ID_PATTERN.test(workspaceId) || !DREAMING_WIKI_NAME_PATTERN.test(name))
       throw new Error("Invalid Wiki reference");
-    const wiki = this.dreaming.findWiki(workspaceId);
-    if (!wiki) return null;
-    if (!ID_PATTERN.test(wiki.directoryId)) throw new Error("Invalid Wiki directory");
+    const directoryId = snapshot
+      ? snapshot.wikiDirectoryId
+      : this.dreaming.findWiki(workspaceId)?.directoryId;
+    if (!directoryId) return null;
+    if (!ID_PATTERN.test(directoryId)) throw new Error("Invalid Wiki directory");
     try {
-      return await readFile(join(this.root, "dreaming", workspaceId, wiki.directoryId, name), {
+      return await readFile(join(this.root, "dreaming", workspaceId, directoryId, name), {
         encoding: "utf8",
         ...(signal ? { signal } : {}),
       });
     } catch (error: unknown) {
       if (error instanceof Error && "code" in error && error.code === "ENOENT") {
         const current = this.dreaming.findWiki(workspaceId);
-        if (current && current.directoryId !== wiki.directoryId)
+        if (!snapshot && current && current.directoryId !== directoryId)
           return this.readWiki(workspaceId, name, signal);
         return null;
       }
@@ -46,13 +58,20 @@ export class DreamingReaderService implements DreamingReader {
   }
 
   // 校验工作区归属并返回指定版本及其来源。
-  public readRevision(workspaceId: string, memoryId: string, revision: number): unknown {
+  public readRevision(
+    workspaceId: string,
+    memoryId: string,
+    revision: number,
+    snapshot?: RunMemorySnapshot,
+  ): unknown {
+    if (snapshot && (snapshot.versions.get(memoryId) ?? 0) < revision)
+      throw new Error("Memory version not in snapshot");
     const memory = this.memories.find(memoryId);
     if (!memory || memory.workspaceId !== workspaceId) throw new Error("Memory not found");
     const version = this.dreaming.findRevision(memoryId, revision);
     if (!version && memory.revision !== revision) throw new Error("Memory revision not found");
     return {
-      memory,
+      memory: version ? { ...memory, content: version.content, revision } : memory,
       revision: version ?? { memoryId, revision, content: memory.content },
       sources: this.dreaming.listSources(memoryId, revision),
     };
@@ -66,8 +85,9 @@ export class DreamingReaderService implements DreamingReader {
     sessionId: string,
     eventId: string,
     signal?: AbortSignal,
+    snapshot?: RunMemorySnapshot,
   ): Promise<unknown> {
-    this.readRevision(workspaceId, memoryId, revision);
+    this.readRevision(workspaceId, memoryId, revision, snapshot);
     const source = this.dreaming
       .listSources(memoryId, revision)
       .find((item) => item.sessionId === sessionId && item.eventId === eventId);

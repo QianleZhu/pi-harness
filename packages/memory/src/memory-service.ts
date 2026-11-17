@@ -87,6 +87,17 @@ export interface MemoryRepository {
     updatedAt: number,
   ): void;
   searchKeywordVisible(query: string, workspaceId: string, limit: number): readonly MemoryRecord[];
+  searchKeywordSnapshot(
+    query: string,
+    workspaceId: string,
+    versions: ReadonlyMap<string, number>,
+    limit: number,
+  ): readonly MemoryRecord[];
+  listSnapshotEmbeddings(
+    workspaceId: string,
+    versions: ReadonlyMap<string, number>,
+    modelId: string,
+  ): readonly VisibleMemoryEmbedding[];
   update(
     memory: StoredMemoryInput,
     expectedRevision: number,
@@ -95,10 +106,29 @@ export interface MemoryRepository {
   updateSettings(settings: MemorySettings, updatedAt: number): void;
 }
 
+// Run 固定 Wiki 版本和每条可见记忆的当前版本。
+export interface RunMemorySnapshot {
+  workspaceId: string;
+  wikiDirectoryId: string | null;
+  wikiVersion: number | null;
+  versions: ReadonlyMap<string, number>;
+}
+
 // 主 Agent 读取已发布的 Dreaming 内容，具体存储由 daemon 提供。
 export interface DreamingReader {
-  readWiki(workspaceId: string, name: string, signal?: AbortSignal): Promise<string | null>;
-  readRevision(workspaceId: string, memoryId: string, revision: number): unknown;
+  captureSnapshot(workspaceId: string): RunMemorySnapshot;
+  readWiki(
+    workspaceId: string,
+    name: string,
+    signal?: AbortSignal,
+    snapshot?: RunMemorySnapshot,
+  ): Promise<string | null>;
+  readRevision(
+    workspaceId: string,
+    memoryId: string,
+    revision: number,
+    snapshot?: RunMemorySnapshot,
+  ): unknown;
   readSource(
     workspaceId: string,
     memoryId: string,
@@ -106,13 +136,30 @@ export interface DreamingReader {
     sessionId: string,
     eventId: string,
     signal?: AbortSignal,
+    snapshot?: RunMemorySnapshot,
   ): Promise<unknown>;
 }
 
 export interface MemoryRuntime {
-  buildContext(query: string, workspaceId: string, signal?: AbortSignal): Promise<string>;
-  readWiki(workspaceId: string, name: string, signal?: AbortSignal): Promise<string | null>;
-  readRevision(workspaceId: string, memoryId: string, revision: number): unknown;
+  captureSnapshot(workspaceId: string): RunMemorySnapshot | null;
+  buildContext(
+    query: string,
+    workspaceId: string,
+    signal?: AbortSignal,
+    snapshot?: RunMemorySnapshot | null,
+  ): Promise<string>;
+  readWiki(
+    workspaceId: string,
+    name: string,
+    signal?: AbortSignal,
+    snapshot?: RunMemorySnapshot | null,
+  ): Promise<string | null>;
+  readRevision(
+    workspaceId: string,
+    memoryId: string,
+    revision: number,
+    snapshot?: RunMemorySnapshot | null,
+  ): unknown;
   readSource(
     workspaceId: string,
     memoryId: string,
@@ -120,6 +167,7 @@ export interface MemoryRuntime {
     sessionId: string,
     eventId: string,
     signal?: AbortSignal,
+    snapshot?: RunMemorySnapshot | null,
   ): Promise<unknown>;
   createFromSession(
     input: {
@@ -138,6 +186,7 @@ export interface MemoryRuntime {
     workspaceId: string,
     limit?: number,
     signal?: AbortSignal,
+    snapshot?: RunMemorySnapshot | null,
   ): Promise<readonly MemoryRecord[]>;
   updateVisibleContent(
     memoryId: string,
@@ -210,20 +259,33 @@ export class MemoryService implements MemoryRuntime {
     private readonly dreaming?: DreamingReader,
   ) {}
 
+  // 为主 Run 固定记忆和 Wiki 的发布版本。
+  public captureSnapshot(workspaceId: string): RunMemorySnapshot | null {
+    if (!this.repository.getSettings().useMemories || !this.dreaming)
+      return { workspaceId, wikiDirectoryId: null, wikiVersion: null, versions: new Map() };
+    return this.dreaming.captureSnapshot(workspaceId);
+  }
+
   // 关闭记忆使用时不读取已发布的 Wiki 或来源。
   public async readWiki(
     workspaceId: string,
     name: string,
     signal?: AbortSignal,
+    snapshot?: RunMemorySnapshot | null,
   ): Promise<string | null> {
     if (!this.repository.getSettings().useMemories || !this.dreaming) return null;
-    return this.dreaming.readWiki(workspaceId, name, signal);
+    return this.dreaming.readWiki(workspaceId, name, signal, snapshot ?? undefined);
   }
 
   // 只读取当前工作区允许访问的记忆版本。
-  public readRevision(workspaceId: string, memoryId: string, revision: number): unknown {
+  public readRevision(
+    workspaceId: string,
+    memoryId: string,
+    revision: number,
+    snapshot?: RunMemorySnapshot | null,
+  ): unknown {
     if (!this.repository.getSettings().useMemories || !this.dreaming) return null;
-    return this.dreaming.readRevision(workspaceId, memoryId, revision);
+    return this.dreaming.readRevision(workspaceId, memoryId, revision, snapshot ?? undefined);
   }
 
   // 只读取记忆版本引用的会话事件。
@@ -234,9 +296,18 @@ export class MemoryService implements MemoryRuntime {
     sessionId: string,
     eventId: string,
     signal?: AbortSignal,
+    snapshot?: RunMemorySnapshot | null,
   ): Promise<unknown> {
     if (!this.repository.getSettings().useMemories || !this.dreaming) return null;
-    return this.dreaming.readSource(workspaceId, memoryId, revision, sessionId, eventId, signal);
+    return this.dreaming.readSource(
+      workspaceId,
+      memoryId,
+      revision,
+      sessionId,
+      eventId,
+      signal,
+      snapshot ?? undefined,
+    );
   }
 
   public getState(): MemoryState {
@@ -403,8 +474,9 @@ export class MemoryService implements MemoryRuntime {
     workspaceId: string,
     limit = 20,
     signal?: AbortSignal,
+    snapshot?: RunMemorySnapshot | null,
   ): Promise<readonly MemoryRecord[]> {
-    return this.searchInternal(query, workspaceId, limit, signal, true);
+    return this.searchInternal(query, workspaceId, limit, signal, true, snapshot);
   }
 
   // 已启动的 Dreaming 整理在学习关闭后仍可读取工作区记忆。
@@ -424,6 +496,7 @@ export class MemoryService implements MemoryRuntime {
     limit: number,
     signal: AbortSignal | undefined,
     requireMemoryUse: boolean,
+    snapshot?: RunMemorySnapshot | null,
   ): Promise<readonly MemoryRecord[]> {
     const normalizedQuery = query.trim();
     if (!normalizedQuery) throw new MemoryError(MemoryErrorCode.INVALID, "检索内容不能为空");
@@ -435,17 +508,27 @@ export class MemoryService implements MemoryRuntime {
       MIN_HYBRID_CANDIDATES,
       resultLimit * HYBRID_CANDIDATE_MULTIPLIER,
     );
-    const keyword = this.repository.searchKeywordVisible(
-      normalizedQuery,
-      workspaceId,
-      candidateLimit,
-    );
+    const keyword = snapshot
+      ? this.repository.searchKeywordSnapshot(
+          normalizedQuery,
+          workspaceId,
+          snapshot.versions,
+          candidateLimit,
+        )
+      : this.repository.searchKeywordVisible(normalizedQuery, workspaceId, candidateLimit);
     try {
       await this.ensureEmbeddingIndex(signal);
       const [queryVector] = await this.embedMany("query", [normalizedQuery], signal);
       if (!queryVector) return keyword.slice(0, resultLimit);
-      const semanticScores = this.repository
-        .listVisibleEmbeddings(workspaceId, this.embedder.modelId)
+      const semanticScores = (
+        snapshot
+          ? this.repository.listSnapshotEmbeddings(
+              workspaceId,
+              snapshot.versions,
+              this.embedder.modelId,
+            )
+          : this.repository.listVisibleEmbeddings(workspaceId, this.embedder.modelId)
+      )
         // ponytail: exact scan is simpler for local memory volumes; add an ANN index when profiling shows this hot.
         .map(({ memory, values }) => ({ memory, score: dotProduct(queryVector, values) }))
         .sort((left, right) => right.score - left.score);
@@ -470,12 +553,13 @@ export class MemoryService implements MemoryRuntime {
     query: string,
     workspaceId: string,
     signal?: AbortSignal,
+    snapshot?: RunMemorySnapshot | null,
   ): Promise<string> {
     this.assertWorkspace(workspaceId);
     const settings = this.repository.getSettings();
     const visible =
       settings.useMemories && query.trim()
-        ? await this.search(query, workspaceId, MAX_CONTEXT_MEMORIES, signal)
+        ? await this.search(query, workspaceId, MAX_CONTEXT_MEMORIES, signal, snapshot)
         : [];
     const selected: MemoryRecord[] = [];
     let characters = 0;
@@ -485,9 +569,15 @@ export class MemoryService implements MemoryRuntime {
       characters += memory.content.length;
     }
     const wikiContext = settings.useMemories
-      ? await this.readWiki(workspaceId, "context.md", signal)
+      ? await this.readWiki(workspaceId, "context.md", signal, snapshot)
       : null;
-    return buildMemoryContextPrompt(selected, settings, wikiContext);
+    // 异步检索期间开关可能发生变化，关闭后不将已读取的内容注入 Run。
+    const currentSettings = this.repository.getSettings();
+    return buildMemoryContextPrompt(
+      currentSettings.useMemories ? selected : [],
+      currentSettings,
+      currentSettings.useMemories ? wikiContext : null,
+    );
   }
 
   private async create(

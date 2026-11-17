@@ -3,7 +3,7 @@ import { ToolPermission, type ToolPolicy } from "@pi-harness/policy";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { MemoryScope, UserProfileFacetSchema } from "./contract.js";
-import type { MemoryRuntime } from "./memory-service.js";
+import type { MemoryRuntime, RunMemorySnapshot } from "./memory-service.js";
 
 const TOOL_TIMEOUT_MS = 30_000;
 const MEMORY_TOOL_SOURCE = "memory";
@@ -42,6 +42,7 @@ function textResult(value: unknown) {
 function createSearchTool(
   memory: MemoryRuntime,
   workspaceId: string,
+  getSnapshot: () => RunMemorySnapshot | null,
 ): AgentTool<typeof SearchMemoriesParameters> {
   return {
     description:
@@ -51,7 +52,9 @@ function createSearchTool(
     name: "search_memories",
     parameters: SearchMemoriesParameters,
     async execute(_toolCallId, input, signal) {
-      return textResult(await memory.search(input.query, workspaceId, input.limit, signal));
+      return textResult(
+        await memory.search(input.query, workspaceId, input.limit, signal, getSnapshot()),
+      );
     },
   };
 }
@@ -160,8 +163,9 @@ export function createMemoryToolRegistrations(
   memory: MemoryRuntime,
   sessionId: string,
   workspaceId: string,
+  getSnapshot: () => RunMemorySnapshot | null = () => null,
 ): readonly MemoryToolRegistration[] {
-  const search = createSearchTool(memory, workspaceId);
+  const search = createSearchTool(memory, workspaceId, getSnapshot);
   const save = createSaveTool(memory, sessionId, workspaceId);
   const update = createUpdateTool(memory, workspaceId);
   const remove = createDeleteTool(memory, workspaceId);

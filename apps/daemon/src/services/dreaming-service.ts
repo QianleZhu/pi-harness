@@ -226,8 +226,6 @@ export class DreamingService {
         now: Date.now(),
       });
       published = true;
-      if (currentWiki)
-        await rm(join(workspaceDir, currentWiki.directoryId), { recursive: true, force: true });
     } catch (error: unknown) {
       if (!published) {
         this.dreaming.failConsolidation(runIds, Date.now());

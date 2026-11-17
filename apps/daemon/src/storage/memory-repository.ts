@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import {
   getDefaultMemorySettings,
   type MemoryEmbedding,
@@ -247,6 +247,96 @@ export class SqliteMemoryRepository implements MemoryRepository {
         memory: mapMemory(row),
         values: mapVector(row.embedding, requiredInteger(row, "dimensions")),
       }));
+  }
+
+  // 按 Run 固定的版本读取记忆，历史内容来自不可变版本表。
+  private listSnapshotMemories(
+    workspaceId: string,
+    versions: ReadonlyMap<string, number>,
+  ): MemoryRecord[] {
+    const result: MemoryRecord[] = [];
+    for (const [id, revision] of versions) {
+      const row = this.database
+        .prepare(`SELECT m.*, r.content AS version_content, r.created_at AS version_updated_at FROM memories m
+        LEFT JOIN memory_revisions r ON r.memory_id = m.id AND r.revision = ?
+        WHERE m.id = ? AND (m.scope = 'user' OR m.workspace_id = ?)`)
+        .get(revision, id, workspaceId);
+      if (!row) continue;
+      const memory = mapMemory(row);
+      if (typeof row.version_content === "string")
+        result.push({
+          ...memory,
+          revision,
+          content: row.version_content,
+          updatedAt: Number(row.version_updated_at),
+        });
+      else if (memory.revision === revision) result.push(memory);
+    }
+    return result;
+  }
+
+  // 在固定版本范围内查找关键词，保留现有 trigram 匹配方式。
+  public searchKeywordSnapshot(
+    query: string,
+    workspaceId: string,
+    versions: ReadonlyMap<string, number>,
+    limit: number,
+  ): readonly MemoryRecord[] {
+    const memories = this.listSnapshotMemories(workspaceId, versions);
+    if (query.length < 3)
+      return memories
+        .filter((memory) => memory.content.toLocaleLowerCase().includes(query.toLocaleLowerCase()))
+        .slice(0, limit);
+    const terms = query
+      .split(/[^\p{L}\p{N}_-]+/u)
+      .map((term) => term.trim())
+      .filter((term) => term.length >= 3)
+      .slice(0, 8);
+    const expression = (terms.length ? terms : [query])
+      .map((term) => `"${term.replaceAll('"', '""')}"`)
+      .join(" OR ");
+    // 每次按固定版本构建 FTS，后台新增版本不会改变本次 Run 的排序。
+    const index = new DatabaseSync(":memory:");
+    try {
+      index.exec(
+        "CREATE VIRTUAL TABLE snapshot_search USING fts5(memory_id UNINDEXED, content, tokenize='trigram')",
+      );
+      const insert = index.prepare(
+        "INSERT INTO snapshot_search (memory_id, content) VALUES (?, ?)",
+      );
+      for (const memory of memories) insert.run(memory.id, memory.content);
+      const rows = index
+        .prepare(
+          "SELECT memory_id FROM snapshot_search WHERE snapshot_search MATCH ? ORDER BY bm25(snapshot_search), rowid LIMIT ?",
+        )
+        .all(expression, limit);
+      const byId = new Map(memories.map((memory) => [memory.id, memory]));
+      return rows.flatMap((row) => {
+        const memory = byId.get(String(row.memory_id));
+        return memory ? [memory] : [];
+      });
+    } finally {
+      index.close();
+    }
+  }
+
+  // 从版本化向量索引读取固定版本，当前版本可复用现有索引。
+  public listSnapshotEmbeddings(
+    workspaceId: string,
+    versions: ReadonlyMap<string, number>,
+    modelId: string,
+  ): readonly VisibleMemoryEmbedding[] {
+    return this.listSnapshotMemories(workspaceId, versions).flatMap((memory) => {
+      const row = this.database
+        .prepare(`SELECT dimensions, embedding FROM memory_revision_embeddings
+        WHERE memory_id = ? AND revision = ? AND model_id = ?
+        UNION ALL SELECT dimensions, embedding FROM memory_embeddings
+        WHERE memory_id = ? AND memory_revision = ? AND model_id = ? LIMIT 1`)
+        .get(memory.id, memory.revision, modelId, memory.id, memory.revision, modelId);
+      return row
+        ? [{ memory, values: mapVector(row.embedding, requiredInteger(row, "dimensions")) }]
+        : [];
+    });
   }
 
   public replaceEmbeddingIndex(

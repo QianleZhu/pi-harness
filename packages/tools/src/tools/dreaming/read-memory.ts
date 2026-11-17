@@ -1,5 +1,5 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { MemoryRuntime } from "@pi-harness/memory";
+import type { MemoryRuntime, RunMemorySnapshot } from "@pi-harness/memory";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 
@@ -20,7 +20,11 @@ function textResult(value: unknown) {
 }
 
 // 逐层读取已发布的 Wiki、记忆版本与关联来源。
-export function createDreamingReadTools(memory: MemoryRuntime, workspaceId: string): AgentTool[] {
+export function createDreamingReadTools(
+  memory: MemoryRuntime,
+  workspaceId: string,
+  getSnapshot: () => RunMemorySnapshot | null = () => null,
+): AgentTool[] {
   return [
     {
       name: "read_memory_wiki",
@@ -31,7 +35,7 @@ export function createDreamingReadTools(memory: MemoryRuntime, workspaceId: stri
       async execute(_id, input, signal) {
         if (!Value.Check(ReadWikiParameters, input))
           throw new Error("MEMORY_INVALID: 无效 Wiki 参数");
-        return textResult(await memory.readWiki(workspaceId, input.name, signal));
+        return textResult(await memory.readWiki(workspaceId, input.name, signal, getSnapshot()));
       },
     },
     {
@@ -43,7 +47,9 @@ export function createDreamingReadTools(memory: MemoryRuntime, workspaceId: stri
       async execute(_id, input) {
         if (!Value.Check(ReadRevisionParameters, input))
           throw new Error("MEMORY_INVALID: 无效记忆版本参数");
-        return textResult(memory.readRevision(workspaceId, input.memoryId, input.revision));
+        return textResult(
+          memory.readRevision(workspaceId, input.memoryId, input.revision, getSnapshot()),
+        );
       },
     },
     {
@@ -63,6 +69,7 @@ export function createDreamingReadTools(memory: MemoryRuntime, workspaceId: stri
             input.sessionId,
             input.eventId,
             signal,
+            getSnapshot(),
           ),
         );
       },

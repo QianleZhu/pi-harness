@@ -589,4 +589,33 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
       VALUES ('dreaming_generation', '1', 0);
     `,
   },
+  {
+    version: "027-dreaming-wiki-versions.sql",
+    sql: `
+      CREATE TABLE dreaming_wiki_versions (
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL CHECK (version > 0),
+        directory_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (workspace_id, version),
+        UNIQUE (workspace_id, directory_id)
+      ) STRICT;
+      INSERT INTO dreaming_wiki_versions (workspace_id, version, directory_id, created_at)
+        SELECT workspace_id, 1, directory_id, updated_at FROM dreaming_wiki;
+
+      CREATE TABLE memory_revision_embeddings (
+        memory_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        model_id TEXT NOT NULL,
+        dimensions INTEGER NOT NULL,
+        embedding BLOB NOT NULL,
+        PRIMARY KEY (memory_id, revision, model_id),
+        FOREIGN KEY (memory_id, revision) REFERENCES memory_revisions(memory_id, revision) ON DELETE CASCADE
+      ) STRICT;
+      INSERT OR IGNORE INTO memory_revision_embeddings (memory_id, revision, model_id, dimensions, embedding)
+        SELECT e.memory_id, e.memory_revision, e.model_id, e.dimensions, e.embedding
+        FROM memory_embeddings e JOIN memory_revisions r
+          ON r.memory_id = e.memory_id AND r.revision = e.memory_revision;
+    `,
+  },
 ];

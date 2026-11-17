@@ -5,7 +5,9 @@ import {
   MemoryEvidenceStatus,
   type MemoryRevision,
   type MemoryRevisionSource,
+  type RunMemorySnapshot,
   DreamingRunStatus as RunStatus,
+  resolveDreamingRevision,
 } from "@pi-harness/memory";
 
 // Dreaming 调度记录与候选共同保存，避免状态和候选分离。
@@ -49,6 +51,37 @@ function mapRevision(row: Record<string, unknown>): MemoryRevision {
 // 管理 Dreaming 的版本、来源、发布指针和 Run 记录。
 export class SqliteDreamingRepository {
   public constructor(private readonly database: DatabaseSync) {}
+
+  // 在同一读取事务中固定 Wiki 指针和所有可见记忆的版本。
+  public captureSnapshot(workspaceId: string): RunMemorySnapshot {
+    this.database.exec("BEGIN");
+    try {
+      const wikiDirectoryId = this.findWiki(workspaceId)?.directoryId ?? null;
+      const wikiVersionRow = wikiDirectoryId
+        ? this.database
+            .prepare(
+              "SELECT version FROM dreaming_wiki_versions WHERE workspace_id = ? AND directory_id = ?",
+            )
+            .get(workspaceId, wikiDirectoryId)
+        : undefined;
+      if (wikiDirectoryId && !wikiVersionRow) throw new Error("Dreaming Wiki version not found");
+      const rows = this.database
+        .prepare(`SELECT id, revision FROM memories
+        WHERE status = 'saved' AND (scope = 'user' OR workspace_id = ?)`)
+        .all(workspaceId);
+      const versions = new Map(rows.map((row) => [String(row.id), Number(row.revision)]));
+      this.database.exec("COMMIT");
+      return {
+        workspaceId,
+        wikiDirectoryId,
+        wikiVersion: wikiVersionRow ? Number(wikiVersionRow.version) : null,
+        versions,
+      };
+    } catch (error: unknown) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
 
   // 读取持久化的开启代次。
   public getGeneration(): number {
@@ -308,10 +341,25 @@ export class SqliteDreamingRepository {
 
   // 保存工作区当前发布的 Wiki 指针。
   public saveWiki(wiki: DreamingWikiRecord): void {
+    // 已发布目录作为稳定版本保留，未发布目录可在恢复时清理。
+    this.database
+      .prepare(`INSERT OR IGNORE INTO dreaming_wiki_versions
+      (workspace_id, version, directory_id, created_at)
+      VALUES (?, (SELECT COALESCE(MAX(version), 0) + 1 FROM dreaming_wiki_versions WHERE workspace_id = ?), ?, ?)`)
+      .run(wiki.workspaceId, wiki.workspaceId, wiki.directoryId, wiki.updatedAt);
     this.database
       .prepare(`INSERT INTO dreaming_wiki (workspace_id, directory_id, updated_at) VALUES (?, ?, ?)
       ON CONFLICT(workspace_id) DO UPDATE SET directory_id = excluded.directory_id, updated_at = excluded.updated_at`)
       .run(wiki.workspaceId, wiki.directoryId, wiki.updatedAt);
+  }
+
+  // 查询已发布的 Wiki 版本，供恢复清理和 Run 按版本读取。
+  public hasWikiVersion(workspaceId: string, directoryId: string): boolean {
+    return (
+      this.database
+        .prepare("SELECT 1 FROM dreaming_wiki_versions WHERE workspace_id = ? AND directory_id = ?")
+        .get(workspaceId, directoryId) !== undefined
+    );
   }
 
   // 保存 Run 处理状态与候选。
@@ -456,29 +504,21 @@ export class SqliteDreamingRepository {
               String(current.content),
               Number(current.updated_at),
             );
-          // 内容一致时复用当前版本并补充来源。
+          this.database
+            .prepare(`INSERT OR IGNORE INTO memory_revision_embeddings
+            (memory_id, revision, model_id, dimensions, embedding)
+            SELECT memory_id, memory_revision, model_id, dimensions, embedding FROM memory_embeddings
+            WHERE memory_id = ? AND memory_revision = ?`)
+            .run(change.memoryId, change.expectedRevision);
+          // 来源集合发生变化时也发布新版本，旧版本的来源保持不变。
           const previous = this.findRevision(change.memoryId, change.expectedRevision);
-          if (
-            current.content === content &&
-            previous?.applicability === change.applicability &&
-            previous.evidenceStatus === change.evidenceStatus
-          ) {
-            for (const source of change.sources) {
-              this.database
-                .prepare(`INSERT OR IGNORE INTO memory_revision_sources
-                (memory_id, revision, session_id, run_id, event_id, event_seq) VALUES (?, ?, ?, ?, ?, ?)`)
-                .run(
-                  change.memoryId,
-                  change.expectedRevision,
-                  source.sessionId,
-                  source.runId,
-                  source.eventId,
-                  source.eventSeq,
-                );
-            }
-            continue;
-          }
-          revision = change.expectedRevision + 1;
+          revision = resolveDreamingRevision(
+            change,
+            { content: String(current.content), revision: change.expectedRevision },
+            previous,
+            this.listSources(change.memoryId, change.expectedRevision),
+          );
+          if (revision === change.expectedRevision) continue;
           this.database
             .prepare(
               `UPDATE memories SET content = ?, normalized_content = ?, revision = ?, updated_at = ? WHERE id = ?`,
@@ -516,6 +556,18 @@ export class SqliteDreamingRepository {
           evidenceStatus: change.evidenceStatus,
           createdAt: input.now,
         });
+        if (change.embedding) {
+          this.database
+            .prepare(`INSERT INTO memory_revision_embeddings
+            (memory_id, revision, model_id, dimensions, embedding) VALUES (?, ?, ?, ?, ?)`)
+            .run(
+              change.memoryId,
+              revision,
+              change.embedding.modelId,
+              change.embedding.dimensions,
+              new Uint8Array(Float32Array.from(change.embedding.values).buffer),
+            );
+        }
         if (change.expectedRevision !== null) {
           // 新版本保留此前可追溯的来源。
           this.database

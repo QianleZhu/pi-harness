@@ -1,6 +1,10 @@
 import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { createMemoryToolRegistrations, type MemoryRuntime } from "@pi-harness/memory";
+import {
+  createMemoryToolRegistrations,
+  type MemoryRuntime,
+  type RunMemorySnapshot,
+} from "@pi-harness/memory";
 import { type CommandPrefixRule, type SandboxCredential, ToolPermission } from "@pi-harness/policy";
 import {
   CommandProcessEventKind,
@@ -83,6 +87,7 @@ export type PrepareExternalTools = (
 // 核心：Map<SessionId, RunCoordinator>
 export class AgentManager {
   private readonly runtimes = new Map<SessionId, RunCoordinator>();
+  private readonly memorySnapshots = new Map<SessionId, RunMemorySnapshot>();
   private readonly commandProcesses = new Map<SessionId, CommandProcessManager>();
   private readonly toolSearch: HybridToolSearch;
   private activeSubAgents = 0;
@@ -133,6 +138,7 @@ export class AgentManager {
   }
 
   public async startRun(input: StartSessionRunInput): Promise<void> {
+    const memorySnapshot = this.memory.captureSnapshot(input.workspaceId);
     const [workspaceContext, memoryContext] = await Promise.all([
       loadWorkspaceAgentContext({
         getRegisteredGlobalSkills: this.getRegisteredGlobalSkills,
@@ -140,7 +146,12 @@ export class AgentManager {
         isSkillEnabled: this.isSkillEnabled,
         workspaceRoot: input.workspaceRoot,
       }),
-      this.memory.buildContext(input.userInput.prompt, input.workspaceId),
+      this.memory.buildContext(
+        input.userInput.prompt,
+        input.workspaceId,
+        undefined,
+        memorySnapshot,
+      ),
     ]);
     const prompts = buildSystemPrompts(workspaceContext, input.workspaceRoot);
     const preparedInput = {
@@ -153,7 +164,16 @@ export class AgentManager {
           : prompts.systemPrompt,
     };
     const runtime = this.getOrCreate(preparedInput);
-    await runtime.start(preparedInput);
+    // Session 复用工具实例，活动 Run 的版本清单不得被后续启动覆盖。
+    if (runtime.activeRunId !== null)
+      throw new Error(`Session ${input.sessionId} already has an active run`);
+    if (memorySnapshot) this.memorySnapshots.set(input.sessionId, memorySnapshot);
+    try {
+      await runtime.start(preparedInput);
+    } finally {
+      if (this.memorySnapshots.get(input.sessionId) === memorySnapshot)
+        this.memorySnapshots.delete(input.sessionId);
+    }
   }
 
   public abort(sessionId: SessionId, runId: RunId): boolean {
@@ -348,8 +368,17 @@ export class AgentManager {
     });
     toolContext.commandProcesses = commandProcesses;
     const toolRegistry = createWorkspaceToolRegistry(toolContext, skillRegistry, [
-      ...createMemoryToolRegistrations(this.memory, input.sessionId, input.workspaceId),
-      ...createDreamingReadTools(this.memory, input.workspaceId).map((tool) => ({
+      ...createMemoryToolRegistrations(
+        this.memory,
+        input.sessionId,
+        input.workspaceId,
+        () => this.memorySnapshots.get(input.sessionId) ?? null,
+      ),
+      ...createDreamingReadTools(
+        this.memory,
+        input.workspaceId,
+        () => this.memorySnapshots.get(input.sessionId) ?? null,
+      ).map((tool) => ({
         policy: { permission: ToolPermission.READ_ONLY },
         source: "memory",
         timeoutMs: 30_000,

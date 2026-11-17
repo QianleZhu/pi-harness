@@ -1,3 +1,4 @@
+import type { UserProfileFacet } from "./contract.js";
 import type { MemoryEmbedding } from "./memory-service.js";
 
 // Dreaming 保存的记忆版本及其证据状态。
@@ -36,6 +37,14 @@ export interface DreamingCandidate {
   sources: { eventId: string; eventSeq: number }[];
 }
 
+// 工作区整理提出的跨项目候选，来源指向已验证的会话事件。
+export interface GlobalDreamingCandidate {
+  content: string;
+  applicability: string | null;
+  evidence: string;
+  sources: Omit<MemoryRevisionSource, "memoryId" | "revision">[];
+}
+
 export interface DreamingMemoryChange {
   memoryId: string;
   expectedRevision: number | null;
@@ -44,6 +53,11 @@ export interface DreamingMemoryChange {
   evidenceStatus: MemoryEvidenceStatus;
   sources: Omit<MemoryRevisionSource, "memoryId" | "revision">[];
   embedding?: MemoryEmbedding | null;
+}
+
+// 全局整理草案的画像分类为空时表示跨项目经验。
+export interface GlobalDreamingMemoryChange extends DreamingMemoryChange {
+  profileFacet: UserProfileFacet | null;
 }
 
 // Wiki 草案只接受单层 Markdown 文件名。

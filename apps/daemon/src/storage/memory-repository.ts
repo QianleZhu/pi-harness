@@ -14,6 +14,7 @@ import {
   type UserProfileFacet as UserProfileFacetValue,
   type VisibleMemoryEmbedding,
 } from "@pi-harness/memory";
+import { recordGlobalMemoryVersion } from "./global-memory-version.js";
 
 interface MemoryRow {
   [key: string]: unknown;
@@ -63,10 +64,7 @@ function mapMemory(row: MemoryRow): MemoryRecord {
   if (profileFacet !== null && !isUserProfileFacet(profileFacet)) {
     throw new Error("Invalid memory profile facet");
   }
-  if (
-    (scope === MemoryScope.USER && profileFacet === null) ||
-    (scope === MemoryScope.WORKSPACE && profileFacet !== null)
-  ) {
+  if (scope === MemoryScope.WORKSPACE && profileFacet !== null) {
     throw new Error("Invalid memory profile scope");
   }
   return {
@@ -128,6 +126,20 @@ export class SqliteMemoryRepository implements MemoryRepository {
         .prepare("INSERT INTO memory_search (memory_id, content) VALUES (?, ?)")
         .run(memory.id, memory.content);
       if (embedding) this.insertEmbedding(memory.id, memory.revision, embedding, memory.updatedAt);
+      // 手动创建的版本也必须能被后续 Run 固定和追溯。
+      this.database
+        .prepare(`INSERT INTO memory_revisions
+          (memory_id, revision, content, applicability, evidence_status, created_at)
+          VALUES (?, ?, ?, NULL, 'user_stated', ?)`)
+        .run(memory.id, memory.revision, memory.content, memory.updatedAt);
+      this.database
+        .prepare(`INSERT INTO memory_revision_embeddings
+          (memory_id, revision, model_id, dimensions, embedding)
+          SELECT memory_id, memory_revision, model_id, dimensions, embedding FROM memory_embeddings
+          WHERE memory_id = ? AND memory_revision = ?`)
+        .run(memory.id, memory.revision);
+      if (memory.scope === MemoryScope.USER)
+        recordGlobalMemoryVersion(this.database, memory.updatedAt);
       this.database.exec("COMMIT");
     } catch (error: unknown) {
       this.database.exec("ROLLBACK");
@@ -138,12 +150,24 @@ export class SqliteMemoryRepository implements MemoryRepository {
   public delete(memoryId: string, expectedRevision: number): boolean {
     this.database.exec("BEGIN IMMEDIATE");
     try {
+      const current = this.database
+        .prepare("SELECT scope FROM memories WHERE id = ? AND revision = ?")
+        .get(memoryId, expectedRevision);
+      // 全局旧版本仍可能被运行中的快照引用，隐藏当前记录并保留其来源。
       const deleted =
-        this.database
-          .prepare("DELETE FROM memories WHERE id = ? AND revision = ?")
-          .run(memoryId, expectedRevision).changes === 1;
+        current?.scope === MemoryScope.USER
+          ? this.database
+              .prepare(
+                "UPDATE memories SET status = 'suggested' WHERE id = ? AND revision = ? AND status = 'saved'",
+              )
+              .run(memoryId, expectedRevision).changes === 1
+          : this.database
+              .prepare("DELETE FROM memories WHERE id = ? AND revision = ?")
+              .run(memoryId, expectedRevision).changes === 1;
       if (deleted) {
         this.database.prepare("DELETE FROM memory_search WHERE memory_id = ?").run(memoryId);
+        if (current?.scope === MemoryScope.USER)
+          recordGlobalMemoryVersion(this.database, Date.now());
       }
       this.database.exec("COMMIT");
       return deleted;
@@ -154,7 +178,9 @@ export class SqliteMemoryRepository implements MemoryRepository {
   }
 
   public find(memoryId: string): MemoryRecord | null {
-    const row = this.database.prepare("SELECT * FROM memories WHERE id = ?").get(memoryId);
+    const row = this.database
+      .prepare("SELECT * FROM memories WHERE id = ? AND status = 'saved'")
+      .get(memoryId);
     return row === undefined ? null : mapMemory(row);
   }
 
@@ -169,13 +195,13 @@ export class SqliteMemoryRepository implements MemoryRepository {
         ? this.database
             .prepare(
               `SELECT * FROM memories
-               WHERE normalized_content = ? AND scope = ? AND workspace_id IS ?`,
+               WHERE normalized_content = ? AND scope = ? AND workspace_id IS ? AND status = 'saved'`,
             )
             .get(normalizedContent, scope, workspaceId)
         : this.database
             .prepare(
               `SELECT * FROM memories
-               WHERE normalized_content = ? AND scope = ? AND workspace_id IS ? AND id <> ?`,
+               WHERE normalized_content = ? AND scope = ? AND workspace_id IS ? AND id <> ? AND status = 'saved'`,
             )
             .get(normalizedContent, scope, workspaceId, excludeId);
     return row === undefined ? null : mapMemory(row);
@@ -205,7 +231,7 @@ export class SqliteMemoryRepository implements MemoryRepository {
            LEFT JOIN memory_embeddings ON memory_embeddings.memory_id = memories.id
              AND memory_embeddings.model_id = ?
              AND memory_embeddings.memory_revision = memories.revision
-           WHERE memory_embeddings.memory_id IS NULL
+           WHERE memories.status = 'saved' AND memory_embeddings.memory_id IS NULL
            LIMIT 1`,
         )
         .get(modelId) === undefined
@@ -222,7 +248,7 @@ export class SqliteMemoryRepository implements MemoryRepository {
 
   public list(): readonly MemoryRecord[] {
     return this.database
-      .prepare("SELECT * FROM memories ORDER BY updated_at DESC, id")
+      .prepare("SELECT * FROM memories WHERE status = 'saved' ORDER BY updated_at DESC, id")
       .all()
       .map(mapMemory);
   }
@@ -253,9 +279,12 @@ export class SqliteMemoryRepository implements MemoryRepository {
   private listSnapshotMemories(
     workspaceId: string,
     versions: ReadonlyMap<string, number>,
+    globalMemories?: readonly MemoryRecord[],
   ): MemoryRecord[] {
-    const result: MemoryRecord[] = [];
+    const result: MemoryRecord[] = [...(globalMemories ?? [])];
+    const globalIds = new Set(globalMemories?.map((memory) => memory.id));
     for (const [id, revision] of versions) {
+      if (globalIds.has(id)) continue;
       const row = this.database
         .prepare(`SELECT m.*, r.content AS version_content, r.created_at AS version_updated_at FROM memories m
         LEFT JOIN memory_revisions r ON r.memory_id = m.id AND r.revision = ?
@@ -281,8 +310,9 @@ export class SqliteMemoryRepository implements MemoryRepository {
     workspaceId: string,
     versions: ReadonlyMap<string, number>,
     limit: number,
+    globalMemories?: readonly MemoryRecord[],
   ): readonly MemoryRecord[] {
-    const memories = this.listSnapshotMemories(workspaceId, versions);
+    const memories = this.listSnapshotMemories(workspaceId, versions, globalMemories);
     if (query.length < 3)
       return memories
         .filter((memory) => memory.content.toLocaleLowerCase().includes(query.toLocaleLowerCase()))
@@ -325,8 +355,9 @@ export class SqliteMemoryRepository implements MemoryRepository {
     workspaceId: string,
     versions: ReadonlyMap<string, number>,
     modelId: string,
+    globalMemories?: readonly MemoryRecord[],
   ): readonly VisibleMemoryEmbedding[] {
-    return this.listSnapshotMemories(workspaceId, versions).flatMap((memory) => {
+    return this.listSnapshotMemories(workspaceId, versions, globalMemories).flatMap((memory) => {
       const row = this.database
         .prepare(`SELECT dimensions, embedding FROM memory_revision_embeddings
         WHERE memory_id = ? AND revision = ? AND model_id = ?
@@ -418,6 +449,22 @@ export class SqliteMemoryRepository implements MemoryRepository {
   ): boolean {
     this.database.exec("BEGIN IMMEDIATE");
     try {
+      const previous = this.database
+        .prepare("SELECT scope, content FROM memories WHERE id = ? AND revision = ?")
+        .get(memory.id, expectedRevision);
+      // 先保存旧内容及向量，确保已启动的 Run 继续读取固定版本。
+      this.database
+        .prepare(`INSERT OR IGNORE INTO memory_revisions
+          (memory_id, revision, content, applicability, evidence_status, created_at)
+          SELECT id, revision, content, NULL, 'user_stated', updated_at FROM memories
+          WHERE id = ? AND revision = ?`)
+        .run(memory.id, expectedRevision);
+      this.database
+        .prepare(`INSERT OR IGNORE INTO memory_revision_embeddings
+          (memory_id, revision, model_id, dimensions, embedding)
+          SELECT memory_id, memory_revision, model_id, dimensions, embedding FROM memory_embeddings
+          WHERE memory_id = ? AND memory_revision = ?`)
+        .run(memory.id, expectedRevision);
       const updated =
         this.database
           .prepare(
@@ -455,6 +502,36 @@ export class SqliteMemoryRepository implements MemoryRepository {
             )
             .run(memory.revision, memory.updatedAt, memory.id, expectedRevision);
         }
+        // 新版本及其向量与当前记录一起提交。
+        if (previous?.content === memory.content) {
+          // 仅调整分类或作用域时保留原有适用条件与证据来源。
+          this.database
+            .prepare(`INSERT INTO memory_revisions
+              (memory_id, revision, content, applicability, evidence_status, created_at)
+              SELECT memory_id, ?, content, applicability, evidence_status, ? FROM memory_revisions
+              WHERE memory_id = ? AND revision = ?`)
+            .run(memory.revision, memory.updatedAt, memory.id, expectedRevision);
+          this.database
+            .prepare(`INSERT INTO memory_revision_sources
+              (memory_id, revision, session_id, run_id, event_id, event_seq)
+              SELECT memory_id, ?, session_id, run_id, event_id, event_seq FROM memory_revision_sources
+              WHERE memory_id = ? AND revision = ?`)
+            .run(memory.revision, memory.id, expectedRevision);
+        } else {
+          this.database
+            .prepare(`INSERT INTO memory_revisions
+              (memory_id, revision, content, applicability, evidence_status, created_at)
+              VALUES (?, ?, ?, NULL, 'user_stated', ?)`)
+            .run(memory.id, memory.revision, memory.content, memory.updatedAt);
+        }
+        this.database
+          .prepare(`INSERT INTO memory_revision_embeddings
+            (memory_id, revision, model_id, dimensions, embedding)
+            SELECT memory_id, memory_revision, model_id, dimensions, embedding FROM memory_embeddings
+            WHERE memory_id = ? AND memory_revision = ?`)
+          .run(memory.id, memory.revision);
+        if (previous?.scope === MemoryScope.USER || memory.scope === MemoryScope.USER)
+          recordGlobalMemoryVersion(this.database, memory.updatedAt);
       }
       this.database.exec("COMMIT");
       return updated;

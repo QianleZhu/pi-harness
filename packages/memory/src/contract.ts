@@ -2,7 +2,7 @@ import { type Static, Type } from "typebox";
 
 // 记忆作用域
 export const MemoryScope = {
-  USER: "user", // 跨项目的个人记忆
+  USER: "user", // 适用于所有项目的用户记忆与通用经验
   WORKSPACE: "workspace", // 只属于某个 Workspace
 } as const;
 export type MemoryScope = (typeof MemoryScope)[keyof typeof MemoryScope];
@@ -47,7 +47,7 @@ export const MemoryRecordSchema = Type.Object({
   content: Type.String({ maxLength: 500, minLength: 1 }), // 记忆正文
   createdAt: Type.Integer({ minimum: 0 }), // 创建时间，Unix 毫秒时间戳
   id: Type.String({ format: "uuid" }), // 记忆唯一 ID
-  profileFacet: Type.Union([UserProfileFacetSchema, Type.Null()]), // 个人画像分类，项目记忆为 null
+  profileFacet: Type.Union([UserProfileFacetSchema, Type.Null()]), // 个人画像分类；通用经验与项目记忆为 null
   revision: Type.Integer({ minimum: 1 }), // 修改版本号，用于防止并发覆盖
   scope: MemoryScopeSchema, // user 为跨项目记忆，workspace 为项目记忆
   sourceSessionId: Type.Union([Type.String({ format: "uuid" }), Type.Null()]), // 来源 Session，手动创建时为 null

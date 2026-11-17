@@ -9,6 +9,7 @@ import {
   CredentialSchema,
   ParentMessageSchema,
 } from "../services/dreaming-worker-protocol.js";
+import { GlobalDreamingService } from "../services/global-dreaming-service.js";
 import { LocalMemoryEmbedder } from "../services/local-memory-embedder.js";
 import { ProviderService } from "../services/provider-service.js";
 import { type HarnessDatabase, openHarnessDatabase } from "../storage/database.js";
@@ -148,6 +149,7 @@ async function start(paths: {
   }
   const embedder = new LocalMemoryEmbedder(paths.globalRoot);
   const memories = new MemoryService(database.memories, embedder);
+  const globalService = new GlobalDreamingService(database.dreaming, database.sessions, providers);
   const service = new DreamingService(
     paths.globalRoot,
     database.sessions,
@@ -157,6 +159,7 @@ async function start(paths: {
     database.memories,
     database.dreaming,
     embedder,
+    globalService,
   );
   scheduler = new DreamingScheduler(
     database.dreaming,
@@ -168,6 +171,7 @@ async function start(paths: {
     (phase, runIds) => send({ type: "failure", phase, runIds }),
     (providerId, active) => send({ type: "activity", providerId, active }),
     refreshProvidersWhenIdle,
+    globalService,
   );
   scheduler.wake();
   send({ type: "ready" });

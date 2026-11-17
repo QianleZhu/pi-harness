@@ -618,4 +618,44 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
           ON r.memory_id = e.memory_id AND r.revision = e.memory_revision;
     `,
   },
+  {
+    version: "028-global-dreaming.sql",
+    sql: `
+      CREATE TABLE global_memory_versions (
+        version INTEGER PRIMARY KEY CHECK (version > 0),
+        memories_json TEXT NOT NULL CHECK (json_valid(memories_json)),
+        created_at INTEGER NOT NULL
+      ) STRICT;
+      INSERT INTO global_memory_versions (version, memories_json, created_at)
+      SELECT 1, COALESCE(json_group_array(json_object(
+        'id', id, 'content', content, 'profileFacet', profile_facet,
+        'scope', scope, 'workspaceId', workspace_id, 'sourceType', source_type,
+        'sourceSessionId', source_session_id, 'revision', revision,
+        'createdAt', created_at, 'updatedAt', updated_at
+      )), '[]'), 0 FROM memories WHERE scope = 'user' AND status = 'saved';
+
+      CREATE TABLE global_dreaming_candidates (
+        id INTEGER PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        candidate_json TEXT NOT NULL CHECK (json_valid(candidate_json)),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'failed')),
+        created_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX global_dreaming_candidates_status_idx
+        ON global_dreaming_candidates(status, id);
+    `,
+  },
+  {
+    version: "029-global-memory-history.sql",
+    sql: `
+      DROP INDEX memories_scope_content_idx;
+      CREATE UNIQUE INDEX memories_scope_content_idx
+        ON memories(scope, COALESCE(workspace_id, ''), normalized_content)
+        WHERE status = 'saved';
+    `,
+  },
+  {
+    version: "030-global-candidates-in-memory.sql",
+    sql: `DROP TABLE global_dreaming_candidates;`,
+  },
 ];

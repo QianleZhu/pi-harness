@@ -6,6 +6,7 @@ import {
   DREAMING_WIKI_NAME_PATTERN,
   type DreamingCandidate,
   type DreamingMemoryChange,
+  type GlobalDreamingCandidate,
   MemoryEvidenceStatus,
   type MemoryRevision,
   type MemoryRevisionSource,
@@ -34,6 +35,12 @@ const WriteWikiSchema = Type.Object({
   name: Type.String(),
   content: Type.String({ maxLength: 40000 }),
 });
+const GlobalCandidateSchema = Type.Object({
+  content: Type.String({ minLength: 1, maxLength: 500 }),
+  applicability: Type.Union([Type.String({ minLength: 1, maxLength: 500 }), Type.Null()]),
+  evidence: Type.String({ minLength: 1, maxLength: 1000 }),
+  candidateIndexes: Type.Array(Type.Integer({ minimum: 0 }), { minItems: 1, maxItems: 30 }),
+});
 
 // 校验整理 Agent 提交的工具参数。
 function validateToolInput<T extends TSchema>(schema: T, value: unknown): Static<T> {
@@ -54,6 +61,7 @@ export function createDreamingTools(options: {
   candidateRuns: { sessionId: string; runId: string }[];
   files: Map<string, string>;
   changes: DreamingMemoryChange[];
+  globalCandidates: GlobalDreamingCandidate[];
   sessions: { find(sessionId: string): { workspaceId: string } | null };
   events: {
     load(
@@ -77,6 +85,7 @@ export function createDreamingTools(options: {
     candidateRuns,
     files,
     changes,
+    globalCandidates,
     sessions,
     events,
     memories,
@@ -217,6 +226,32 @@ export function createDreamingTools(options: {
           memoryId,
           revision: resolveDreamingRevision(change, memory, prior, priorSources),
         });
+      },
+    },
+    {
+      name: "propose_global_memory",
+      label: "Propose global memory",
+      description:
+        "Propose a durable cross-project memory supported by candidate indexes; omit if none qualifies.",
+      executionMode: "sequential",
+      parameters: GlobalCandidateSchema,
+      execute: async (_id, value) => {
+        count();
+        const args = validateToolInput(GlobalCandidateSchema, value);
+        if (globalCandidates.length >= 30) throw new Error("Too many global candidates");
+        const sources = args.candidateIndexes.flatMap((index) => {
+          const candidate = candidates[index];
+          const origin = candidateRuns[index];
+          if (!candidate || !origin) throw new Error("Candidate not found");
+          return candidate.sources.map((source) => ({ ...source, ...origin }));
+        });
+        globalCandidates.push({
+          content: args.content,
+          applicability: args.applicability,
+          evidence: args.evidence,
+          sources,
+        });
+        return result({ accepted: true });
       },
     },
     {

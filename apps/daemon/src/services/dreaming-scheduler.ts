@@ -5,6 +5,7 @@ import type {
 } from "../storage/dreaming-repository.js";
 import type { SessionEventStore } from "../storage/session-event-store.js";
 import type { DreamingService } from "./dreaming-service.js";
+import type { GlobalDreamingService } from "./global-dreaming-service.js";
 import type { ProviderService } from "./provider-service.js";
 
 const IDLE_MS = 30 * 60_000;
@@ -16,6 +17,7 @@ export class DreamingScheduler {
   private readonly controller = new AbortController();
   private readonly activeSessions = new Set<string>();
   private readonly activeWorkspaces = new Set<string>();
+  private isGlobalActive = false;
   private readonly activeProviders = new Map<string, number>();
   private readonly tasks = new Set<Promise<void>>();
   private readonly queue: DreamingRunRecord[] = [];
@@ -34,11 +36,12 @@ export class DreamingScheduler {
     private readonly service: DreamingService,
     private readonly isSessionActive: (sessionId: string) => boolean | Promise<boolean>,
     private readonly onError: (
-      phase: "scan" | "analysis" | "consolidation",
+      phase: "scan" | "analysis" | "consolidation" | "global_consolidation",
       ids: readonly string[],
     ) => void,
     private readonly onProviderActivity: (providerId: string, active: boolean) => void = () => {},
     private readonly prepareScan: () => boolean = () => true,
+    private readonly globalService?: GlobalDreamingService,
   ) {}
 
   // 判断是否存在正在分析或整理的后台工作。
@@ -128,6 +131,20 @@ export class DreamingScheduler {
 
     const settings = this.memories.getSettings();
     if (!settings.useMemories || !settings.generateMemories) return;
+    if (this.globalService && !this.isGlobalActive && this.globalService.hasPending()) {
+      this.isGlobalActive = true;
+      this.track(
+        "global_consolidation",
+        [],
+        model.providerId,
+        () =>
+          this.globalService?.consolidate({ ...model, signal: this.controller.signal }) ??
+          Promise.resolve(),
+        () => {
+          this.isGlobalActive = false;
+        },
+      );
+    }
     const eligible = new Map<string, boolean>();
     for (const run of this.dreaming.listPendingRuns()) {
       if (this.controller.signal.aborted) return;
@@ -229,7 +246,7 @@ export class DreamingScheduler {
 
   // 任务完成后只释放名额并消费现有队列，不触发新的扫描。
   private track(
-    phase: "analysis" | "consolidation",
+    phase: "analysis" | "consolidation" | "global_consolidation",
     ids: string[],
     providerId: string,
     work: () => Promise<void>,

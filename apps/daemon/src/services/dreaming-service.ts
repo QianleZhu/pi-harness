@@ -7,6 +7,7 @@ import {
   DREAMING_CONSOLIDATION_PROMPT,
   type DreamingMemoryChange,
   DreamingRunStatus,
+  type GlobalDreamingCandidate,
   type MemoryEmbedder,
   type MemoryService,
   resolveDreamingRevision,
@@ -18,6 +19,7 @@ import type { SessionEventStore } from "../storage/session-event-store.js";
 import { readStoredCandidates, textData } from "../utils/dreaming-analysis.js";
 import { ID_PATTERN, readWiki, validateWiki } from "../utils/dreaming-wiki.js";
 import { DreamingAnalysisService } from "./dreaming-analysis-service.js";
+import type { GlobalDreamingService } from "./global-dreaming-service.js";
 import type { ProviderService } from "./provider-service.js";
 
 // 串联单 Run 分析、整理草案和数据库发布。
@@ -32,6 +34,7 @@ export class DreamingService {
     private readonly memoryStore: SqliteMemoryRepository,
     private readonly dreaming: SqliteDreamingRepository,
     private readonly embedder: MemoryEmbedder,
+    private readonly globalService: GlobalDreamingService,
   ) {
     this.analysis = new DreamingAnalysisService(sessions, events, providers);
   }
@@ -146,6 +149,7 @@ export class DreamingService {
       );
       const originalFiles = new Map(files);
       const changes: DreamingMemoryChange[] = [];
+      const globalCandidates: GlobalDreamingCandidate[] = [];
       let abortAgent = () => {};
       const tools = createDreamingTools({
         input: toolInput,
@@ -154,6 +158,7 @@ export class DreamingService {
         candidateRuns,
         files,
         changes,
+        globalCandidates,
         sessions: this.sessions,
         events: this.events,
         memories: this.memories,
@@ -207,6 +212,7 @@ export class DreamingService {
         [...files].every(([name, content]) => originalFiles.get(name) === content)
       ) {
         this.dreaming.completeConsolidation(runIds, Date.now());
+        this.globalService.enqueue(input.workspaceId, globalCandidates);
         return;
       }
       const references = validateWiki(
@@ -255,6 +261,7 @@ export class DreamingService {
         now: Date.now(),
       });
       published = true;
+      this.globalService.enqueue(input.workspaceId, globalCandidates);
     } catch (error: unknown) {
       if (!published) {
         this.dreaming.failConsolidation(runIds, Date.now());

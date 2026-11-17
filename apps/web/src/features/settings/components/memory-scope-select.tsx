@@ -50,8 +50,8 @@ export function MemoryScopeSelect({
       </Select.Trigger>
       <Select.Popover className="max-w-[calc(100vw-2rem)]">
         <ListBox>
-          <ListBox.Item id={USER_SCOPE_KEY} textValue="个人 · 所有项目">
-            个人 · 所有项目
+          <ListBox.Item id={USER_SCOPE_KEY} textValue="全局 · 所有项目">
+            全局 · 所有项目
             <ListBox.ItemIndicator />
           </ListBox.Item>
           {workspaces.map((workspace) => (

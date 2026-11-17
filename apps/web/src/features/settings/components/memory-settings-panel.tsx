@@ -32,7 +32,7 @@ const MemoryView = {
 const MEMORY_FILTERS = [
   { id: MemoryView.ALL, label: "全部记忆" },
   { id: MemoryView.PROFILE, label: "用户画像" },
-  { id: MemoryView.USER, label: "个人记忆" },
+  { id: MemoryView.USER, label: "全局记忆" },
   { id: MemoryView.PROJECT, label: "项目记忆" },
 ];
 
@@ -58,7 +58,7 @@ export function MemorySettingsPanel({
   const matchesSearch = (entry: MemoryRecord) => {
     const scopeLabel =
       entry.scope === MemoryScope.USER
-        ? "个人 所有项目"
+        ? "全局 所有项目"
         : `项目 ${workspaceNames.get(entry.workspaceId ?? "") ?? "已移除项目"}`;
     const source = entry.sourceType === MemorySourceType.MANUAL ? "手动添加" : "来自对话";
     const facet = getMemoryProfileFacetLabel(entry.profileFacet) ?? "";
@@ -87,9 +87,11 @@ export function MemorySettingsPanel({
   const renderMemory = (entry: MemoryRecord) => {
     const scopeLabel =
       entry.scope === MemoryScope.USER
-        ? "个人 · 所有项目"
+        ? "全局 · 所有项目"
         : `项目 · ${workspaceNames.get(entry.workspaceId ?? "") ?? "已移除项目"}`;
-    const facetLabel = getMemoryProfileFacetLabel(entry.profileFacet);
+    const facetLabel =
+      getMemoryProfileFacetLabel(entry.profileFacet) ??
+      (entry.scope === MemoryScope.USER ? "跨项目经验" : null);
     const Icon = entry.scope === MemoryScope.USER ? Person : FolderOpen;
     return (
       <SettingsCatalogItem

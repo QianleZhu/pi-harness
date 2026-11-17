@@ -14,14 +14,14 @@ const SearchMemoriesParameters = Type.Object({
 });
 const CreateMemoryParameters = Type.Object({
   content: Type.String({ maxLength: 500, minLength: 1 }),
-  profileFacet: Type.Optional(UserProfileFacetSchema),
+  profileFacet: Type.Optional(Type.Union([UserProfileFacetSchema, Type.Null()])),
   scope: Type.Union([Type.Literal(MemoryScope.USER), Type.Literal(MemoryScope.WORKSPACE)]),
 });
 const UpdateMemoryParameters = Type.Object({
   content: Type.String({ maxLength: 500, minLength: 1 }),
   expectedRevision: Type.Integer({ minimum: 1 }),
   memoryId: Type.String({ format: "uuid" }),
-  profileFacet: Type.Optional(UserProfileFacetSchema),
+  profileFacet: Type.Optional(Type.Union([UserProfileFacetSchema, Type.Null()])),
 });
 const DeleteMemoryParameters = Type.Object({
   expectedRevision: Type.Integer({ minimum: 1 }),
@@ -66,7 +66,7 @@ function createSaveTool(
 ): AgentTool<typeof CreateMemoryParameters> {
   return {
     description:
-      "保存一条长期记忆。仅当用户明确要求记住、保存为记忆时调用；个人记忆应设置 profileFacet；不得保存秘密或临时任务细节。",
+      "保存一条长期记忆。仅当用户明确要求记住时调用；用户画像设置 profileFacet，跨项目通用经验设置 profileFacet 为 null；不得保存秘密或临时任务细节。",
     executionMode: "sequential",
     label: "Save memory",
     name: "save_memory",
@@ -92,7 +92,7 @@ function createUpdateTool(
 ): AgentTool<typeof UpdateMemoryParameters> {
   return {
     description:
-      "改写现有长期记忆，也可调整个人记忆的 profileFacet。先通过上下文或 search_memories 取得 ID 和 revision，并且仅在用户明确要求修改时调用。",
+      "改写现有长期记忆，也可调整画像分类或将通用经验的 profileFacet 设为 null。先取得 ID 和 revision，仅在用户明确要求修改时调用。",
     executionMode: "sequential",
     label: "Update memory",
     name: "update_memory",

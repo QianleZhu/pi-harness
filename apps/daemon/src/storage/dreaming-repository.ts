@@ -2,13 +2,18 @@ import type { DatabaseSync } from "node:sqlite";
 import {
   type DreamingMemoryChange,
   type DreamingRunStatus,
+  type GlobalDreamingMemoryChange,
   MemoryEvidenceStatus,
+  MemoryRecordSchema,
   type MemoryRevision,
   type MemoryRevisionSource,
   type RunMemorySnapshot,
   DreamingRunStatus as RunStatus,
   resolveDreamingRevision,
 } from "@pi-harness/memory";
+import { Type } from "typebox";
+import { Value } from "typebox/value";
+import { recordGlobalMemoryVersion } from "./global-memory-version.js";
 
 // Dreaming 调度记录与候选共同保存，避免状态和候选分离。
 export interface DreamingRunRecord {
@@ -70,13 +75,172 @@ export class SqliteDreamingRepository {
         WHERE status = 'saved' AND (scope = 'user' OR workspace_id = ?)`)
         .all(workspaceId);
       const versions = new Map(rows.map((row) => [String(row.id), Number(row.revision)]));
+      const global = this.getGlobalVersion();
+      const workspaceRow = this.database
+        .prepare(`SELECT COALESCE(json_group_array(json_object(
+        'id', id, 'content', content, 'profileFacet', profile_facet, 'scope', scope,
+        'workspaceId', workspace_id, 'sourceType', source_type, 'sourceSessionId', source_session_id,
+        'revision', revision, 'createdAt', created_at, 'updatedAt', updated_at)), '[]') AS memories_json
+        FROM memories WHERE scope = 'workspace' AND workspace_id = ? AND status = 'saved'`)
+        .get(workspaceId);
+      if (!workspaceRow || typeof workspaceRow.memories_json !== "string")
+        throw new Error("Invalid workspace snapshot");
+      const workspaceMemories: unknown = JSON.parse(workspaceRow.memories_json);
+      if (!Value.Check(Type.Array(MemoryRecordSchema), workspaceMemories))
+        throw new Error("Invalid workspace snapshot");
       this.database.exec("COMMIT");
       return {
         workspaceId,
         wikiDirectoryId,
         wikiVersion: wikiVersionRow ? Number(wikiVersionRow.version) : null,
         versions,
+        globalVersion: global.version,
+        globalMemories: global.memories,
+        workspaceMemories: workspaceMemories as import("@pi-harness/memory").MemoryRecord[],
       };
+    } catch (error: unknown) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  // 读取当前 user 记忆发布版本及其不可变副本。
+  public getGlobalVersion(): {
+    version: number;
+    memories: import("@pi-harness/memory").MemoryRecord[];
+  } {
+    const row = this.database
+      .prepare(
+        "SELECT version, memories_json FROM global_memory_versions ORDER BY version DESC LIMIT 1",
+      )
+      .get();
+    if (!row || typeof row.memories_json !== "string")
+      throw new Error("Global memory version not found");
+    const memories: unknown = JSON.parse(row.memories_json);
+    if (!Value.Check(Type.Array(MemoryRecordSchema), memories))
+      throw new Error("Invalid global memory version");
+    return {
+      version: Number(row.version),
+      memories: memories as import("@pi-harness/memory").MemoryRecord[],
+    };
+  }
+
+  // 原子提交全局草案、来源、索引和发布副本。
+  public publishGlobal(input: {
+    expectedVersion: number;
+    changes: readonly GlobalDreamingMemoryChange[];
+    now: number;
+  }): boolean {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      if (this.getGlobalVersion().version !== input.expectedVersion) {
+        this.database.exec("ROLLBACK");
+        return false;
+      }
+      let changed = false;
+      for (const change of input.changes) {
+        const content = change.content.trim().replaceAll(/\s+/g, " ");
+        if (!content || content.length > 500 || !change.sources.length)
+          throw new Error("Invalid global memory change");
+        let revision = 1;
+        if (change.expectedRevision === null) {
+          this.database
+            .prepare(`INSERT INTO memories
+            (id, content, normalized_content, profile_facet, scope, workspace_id, status, source_type, source_session_id, revision, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'user', NULL, 'saved', 'session', ?, 1, ?, ?)`)
+            .run(
+              change.memoryId,
+              content,
+              content.toLocaleLowerCase(),
+              change.profileFacet,
+              change.sources[0]?.sessionId ?? null,
+              input.now,
+              input.now,
+            );
+        } else {
+          const current = this.database
+            .prepare("SELECT * FROM memories WHERE id = ? AND scope = 'user' AND status = 'saved'")
+            .get(change.memoryId);
+          if (!current || current.revision !== change.expectedRevision)
+            throw new Error("Global memory revision conflict");
+          this.database
+            .prepare(`INSERT OR IGNORE INTO memory_revisions
+            (memory_id, revision, content, applicability, evidence_status, created_at)
+            VALUES (?, ?, ?, NULL, 'user_stated', ?)`)
+            .run(
+              change.memoryId,
+              change.expectedRevision,
+              String(current.content),
+              Number(current.updated_at),
+            );
+          this.database
+            .prepare(`INSERT OR IGNORE INTO memory_revision_embeddings
+            (memory_id, revision, model_id, dimensions, embedding)
+            SELECT memory_id, memory_revision, model_id, dimensions, embedding FROM memory_embeddings
+            WHERE memory_id = ? AND memory_revision = ?`)
+            .run(change.memoryId, change.expectedRevision);
+          revision = resolveDreamingRevision(
+            change,
+            { content: String(current.content), revision: change.expectedRevision },
+            this.findRevision(change.memoryId, change.expectedRevision),
+            this.listSources(change.memoryId, change.expectedRevision),
+          );
+          if (revision === change.expectedRevision && current.profile_facet !== change.profileFacet)
+            revision++;
+          if (revision === change.expectedRevision) continue;
+          this.database
+            .prepare(
+              "UPDATE memories SET content = ?, normalized_content = ?, profile_facet = ?, revision = ?, updated_at = ? WHERE id = ?",
+            )
+            .run(
+              content,
+              content.toLocaleLowerCase(),
+              change.profileFacet,
+              revision,
+              input.now,
+              change.memoryId,
+            );
+          this.database
+            .prepare("DELETE FROM memory_search WHERE memory_id = ?")
+            .run(change.memoryId);
+          this.database
+            .prepare("DELETE FROM memory_embeddings WHERE memory_id = ?")
+            .run(change.memoryId);
+        }
+        changed = true;
+        this.database
+          .prepare("INSERT INTO memory_search (memory_id, content) VALUES (?, ?)")
+          .run(change.memoryId, content);
+        this.createRevision({
+          memoryId: change.memoryId,
+          revision,
+          content,
+          applicability: change.applicability,
+          evidenceStatus: change.evidenceStatus,
+          createdAt: input.now,
+        });
+        if (change.expectedRevision !== null)
+          this.database
+            .prepare(`INSERT INTO memory_revision_sources
+          (memory_id, revision, session_id, run_id, event_id, event_seq)
+          SELECT memory_id, ?, session_id, run_id, event_id, event_seq FROM memory_revision_sources WHERE memory_id = ? AND revision = ?`)
+            .run(revision, change.memoryId, change.expectedRevision);
+        for (const source of change.sources)
+          this.database
+            .prepare(`INSERT OR IGNORE INTO memory_revision_sources
+          (memory_id, revision, session_id, run_id, event_id, event_seq) VALUES (?, ?, ?, ?, ?, ?)`)
+            .run(
+              change.memoryId,
+              revision,
+              source.sessionId,
+              source.runId,
+              source.eventId,
+              source.eventSeq,
+            );
+      }
+      if (changed) recordGlobalMemoryVersion(this.database, input.now);
+      this.database.exec("COMMIT");
+      return true;
     } catch (error: unknown) {
       this.database.exec("ROLLBACK");
       throw error;

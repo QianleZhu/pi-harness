@@ -92,11 +92,13 @@ export interface MemoryRepository {
     workspaceId: string,
     versions: ReadonlyMap<string, number>,
     limit: number,
+    globalMemories?: readonly MemoryRecord[],
   ): readonly MemoryRecord[];
   listSnapshotEmbeddings(
     workspaceId: string,
     versions: ReadonlyMap<string, number>,
     modelId: string,
+    globalMemories?: readonly MemoryRecord[],
   ): readonly VisibleMemoryEmbedding[];
   update(
     memory: StoredMemoryInput,
@@ -112,11 +114,15 @@ export interface RunMemorySnapshot {
   wikiDirectoryId: string | null;
   wikiVersion: number | null;
   versions: ReadonlyMap<string, number>;
+  globalVersion?: number;
+  globalMemories?: readonly MemoryRecord[];
+  workspaceMemories?: readonly MemoryRecord[];
 }
 
 // 主 Agent 读取已发布的 Dreaming 内容，具体存储由 daemon 提供。
 export interface DreamingReader {
   captureSnapshot(workspaceId: string): RunMemorySnapshot;
+  readGlobalContext(snapshot?: RunMemorySnapshot): string | null;
   readWiki(
     workspaceId: string,
     name: string,
@@ -230,11 +236,17 @@ function normalizeProfileFacet(
   scope: MemoryScopeValue,
   profileFacet: UserProfileFacetValue | null | undefined,
 ): UserProfileFacetValue | null {
-  return scope === MemoryScope.USER ? (profileFacet ?? UserProfileFacet.PREFERENCES) : null;
+  return scope === MemoryScope.USER
+    ? profileFacet === undefined
+      ? UserProfileFacet.PREFERENCES
+      : profileFacet
+    : null;
 }
 
 export function buildUserProfile(memories: readonly MemoryRecord[]): UserProfile {
-  const personal = memories.filter((memory) => memory.scope === MemoryScope.USER);
+  const personal = memories.filter(
+    (memory) => memory.scope === MemoryScope.USER && memory.profileFacet !== null,
+  );
   return {
     sections: PROFILE_FACETS.map((facet) => ({
       facet,
@@ -259,7 +271,14 @@ export class MemoryService implements MemoryRuntime {
   // 为主 Run 固定记忆和 Wiki 的发布版本。
   public captureSnapshot(workspaceId: string): RunMemorySnapshot | null {
     if (!this.repository.getSettings().useMemories || !this.dreaming)
-      return { workspaceId, wikiDirectoryId: null, wikiVersion: null, versions: new Map() };
+      return {
+        workspaceId,
+        wikiDirectoryId: null,
+        wikiVersion: null,
+        versions: new Map(),
+        globalMemories: [],
+        workspaceMemories: [],
+      };
     return this.dreaming.captureSnapshot(workspaceId);
   }
 
@@ -511,6 +530,9 @@ export class MemoryService implements MemoryRuntime {
           workspaceId,
           snapshot.versions,
           candidateLimit,
+          snapshot.globalMemories && snapshot.workspaceMemories
+            ? [...snapshot.globalMemories, ...snapshot.workspaceMemories]
+            : snapshot.globalMemories,
         )
       : this.repository.searchKeywordVisible(normalizedQuery, workspaceId, candidateLimit);
     try {
@@ -523,6 +545,9 @@ export class MemoryService implements MemoryRuntime {
               workspaceId,
               snapshot.versions,
               this.embedder.modelId,
+              snapshot.globalMemories && snapshot.workspaceMemories
+                ? [...snapshot.globalMemories, ...snapshot.workspaceMemories]
+                : snapshot.globalMemories,
             )
           : this.repository.listVisibleEmbeddings(workspaceId, this.embedder.modelId)
       )
@@ -557,11 +582,16 @@ export class MemoryService implements MemoryRuntime {
     const wikiContext = settings.useMemories
       ? await this.readWiki(workspaceId, "context.md", signal, snapshot)
       : null;
+    const globalContext =
+      settings.useMemories && this.dreaming
+        ? this.dreaming.readGlobalContext(snapshot ?? undefined)
+        : null;
     // 读取期间开关可能发生变化，关闭后不注入已读取的内容。
     const currentSettings = this.repository.getSettings();
     return buildMemoryContextPrompt(
       currentSettings,
       currentSettings.useMemories ? wikiContext : null,
+      currentSettings.useMemories ? globalContext : null,
     );
   }
 

@@ -13,6 +13,8 @@ import {
   type MemoryWorkspaceOption,
 } from "./memory-scope-select";
 
+const GLOBAL_EXPERIENCE = "global_experience";
+
 export function MemoryEditorDialog({
   entry,
   isSaving,
@@ -32,8 +34,10 @@ export function MemoryEditorDialog({
     scope: entry?.scope ?? MemoryScope.USER,
     workspaceId: entry?.workspaceId ?? null,
   });
-  const [profileFacet, setProfileFacet] = useState(
-    entry?.profileFacet ?? UserProfileFacet.PREFERENCES,
+  const [profileFacet, setProfileFacet] = useState<UserProfileFacet | typeof GLOBAL_EXPERIENCE>(
+    entry?.scope === MemoryScope.USER && entry.profileFacet === null
+      ? GLOBAL_EXPERIENCE
+      : (entry?.profileFacet ?? UserProfileFacet.PREFERENCES),
   );
   return (
     <Modal.Backdrop
@@ -57,7 +61,10 @@ export function MemoryEditorDialog({
                 if (!content.trim() || isSaving) return;
                 void onSave({
                   content: content.trim(),
-                  profileFacet: scope.scope === MemoryScope.USER ? profileFacet : null,
+                  profileFacet:
+                    scope.scope === MemoryScope.USER && profileFacet !== GLOBAL_EXPERIENCE
+                      ? profileFacet
+                      : null,
                   ...scope,
                 });
               }}
@@ -79,16 +86,21 @@ export function MemoryEditorDialog({
                   variant="secondary"
                   value={profileFacet}
                   onChange={(key) => {
-                    if (isMemoryProfileFacet(key)) setProfileFacet(key);
+                    if (key === GLOBAL_EXPERIENCE || isMemoryProfileFacet(key))
+                      setProfileFacet(key);
                   }}
                 >
-                  <Label>画像分类</Label>
+                  <Label>全局记忆分类</Label>
                   <Select.Trigger>
                     <Select.Value />
                     <Select.Indicator />
                   </Select.Trigger>
                   <Select.Popover className="max-w-[calc(100vw-2rem)]">
                     <ListBox>
+                      <ListBox.Item id={GLOBAL_EXPERIENCE} textValue="跨项目经验">
+                        跨项目经验
+                        <ListBox.ItemIndicator />
+                      </ListBox.Item>
                       {MEMORY_PROFILE_FACETS.map((facet) => (
                         <ListBox.Item id={facet.id} key={facet.id} textValue={facet.label}>
                           {facet.label}
@@ -100,7 +112,7 @@ export function MemoryEditorDialog({
                 </Select>
               ) : null}
               <p className="text-sm text-muted">
-                个人记忆适用于所有项目，项目记忆仅在对应项目中使用。
+                全局记忆适用于所有项目，项目记忆仅在对应项目中使用。
               </p>
             </Form>
           </Modal.Body>

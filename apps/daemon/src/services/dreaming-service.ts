@@ -9,6 +9,7 @@ import {
   DreamingRunStatus,
   type MemoryEmbedder,
   type MemoryService,
+  resolveDreamingRevision,
 } from "@pi-harness/memory";
 import type { SessionRepository } from "../storage/database.js";
 import type { SqliteDreamingRepository } from "../storage/dreaming-repository.js";
@@ -143,6 +144,7 @@ export class DreamingService {
       const files = await readWiki(
         currentWiki ? join(workspaceDir, currentWiki.directoryId) : null,
       );
+      const originalFiles = new Map(files);
       const changes: DreamingMemoryChange[] = [];
       let abortAgent = () => {};
       const tools = createDreamingTools({
@@ -180,6 +182,33 @@ export class DreamingService {
       const last = agent.state.messages.at(-1);
       if (last?.role !== "assistant" || last.stopReason !== "stop")
         throw new Error("Dreaming consolidation failed");
+      // 草案未改变记忆或来源，且 Wiki 内容未变化时，不需要创建发布目录。
+      const hasMemoryChanges = changes.some((change) => {
+        if (change.expectedRevision === null) return true;
+        const memory = this.memoryStore.find(change.memoryId);
+        if (
+          !memory ||
+          memory.workspaceId !== input.workspaceId ||
+          memory.revision !== change.expectedRevision
+        )
+          return true;
+        return (
+          resolveDreamingRevision(
+            change,
+            memory,
+            this.dreaming.findRevision(memory.id, memory.revision),
+            this.dreaming.listSources(memory.id, memory.revision),
+          ) !== memory.revision
+        );
+      });
+      if (
+        !hasMemoryChanges &&
+        files.size === originalFiles.size &&
+        [...files].every(([name, content]) => originalFiles.get(name) === content)
+      ) {
+        this.dreaming.completeConsolidation(runIds, Date.now());
+        return;
+      }
       const references = validateWiki(
         files,
         changes,

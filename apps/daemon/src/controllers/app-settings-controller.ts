@@ -13,6 +13,7 @@ import {
   type FileOpenService,
   FileOpenServiceError,
 } from "../services/file-open-service.js";
+import { ProviderErrorCode, ProviderServiceError } from "../services/provider-service.js";
 import { isMutationRequestAllowed, rejectMutation } from "../utils/request-security.js";
 import type { AppSettingsVo } from "../vo/app-settings-vo.js";
 
@@ -41,7 +42,7 @@ export class AppSettingsController {
   ): Promise<AppSettingsVo | FastifyReply> => {
     if (!isMutationRequestAllowed(this.config, request)) return rejectMutation(reply);
     try {
-      return this.settings.update(request.body);
+      return await this.settings.update(request.body);
     } catch (error: unknown) {
       return this.sendError(request, reply, error);
     }
@@ -158,6 +159,9 @@ export class AppSettingsController {
   };
 
   private sendError(request: FastifyRequest, reply: FastifyReply, error: unknown): FastifyReply {
+    if (error instanceof ProviderServiceError && error.code === ProviderErrorCode.IN_USE) {
+      return reply.status(409).send({ code: error.code, message: error.message });
+    }
     if (error instanceof FileOpenServiceError) {
       const status =
         error.code === FileOpenErrorCode.PICKER_BUSY

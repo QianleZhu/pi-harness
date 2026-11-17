@@ -19,6 +19,7 @@ import type {
 } from "../storage/database.js";
 import type { SqliteDreamingRepository } from "../storage/dreaming-repository.js";
 import { readMacApplicationIconByBundleId } from "../utils/mac-application-icon.js";
+import { ProviderErrorCode, ProviderServiceError } from "./provider-service.js";
 
 export interface AppSettings {
   approvalPolicy: ApprovalPolicyValue;
@@ -42,6 +43,7 @@ export class AppSettingsService {
     private readonly globalRoot: string,
     private readonly dreaming: SqliteDreamingRepository,
     private readonly onExecutionPolicyChanged: () => Promise<void>,
+    private readonly isDreamingActive: () => boolean = () => false,
   ) {}
 
   public async get(): Promise<AppSettings> {
@@ -67,7 +69,17 @@ export class AppSettingsService {
   }
 
   public async update(input: UpdateAppSettingsDto): Promise<AppSettings> {
+    // 先检查整次更新，避免模型被拒绝时其他设置已写入。
+    if (input.dreamingModel !== undefined && this.isDreamingActive()) {
+      throw new ProviderServiceError(
+        ProviderErrorCode.IN_USE,
+        "Dreaming 正在执行，请等待完成后再修改 Dreaming 模型",
+      );
+    }
     const updatedAt = Date.now();
+    if (input.dreamingModel !== undefined) {
+      this.dreaming.setModel(input.dreamingModel, updatedAt);
+    }
     if (input.approvalPolicy !== undefined) {
       const changed = input.approvalPolicy !== this.settings.getApprovalPolicy();
       this.settings.setApprovalPolicy(input.approvalPolicy, updatedAt);
@@ -81,9 +93,6 @@ export class AppSettingsService {
     }
     if (input.defaultModel !== undefined) {
       this.settings.setDefaultModel(input.defaultModel, updatedAt);
-    }
-    if (input.dreamingModel !== undefined) {
-      this.dreaming.setModel(input.dreamingModel, updatedAt);
     }
     if (input.fileOpenMode !== undefined) {
       this.settings.setFileOpenMode(input.fileOpenMode, updatedAt);

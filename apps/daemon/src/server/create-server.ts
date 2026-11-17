@@ -102,11 +102,13 @@ export async function createServer(config: HarnessConfig = loadHarnessConfig()) 
     async (mcpServer) =>
       (await skillConnections?.invalidatePluginAppCredential(mcpServer)) ?? false,
   );
+  let dreamingWorker: DreamingWorkerHost | undefined;
   const appSettings = new AppSettingsService(
     database.appSettings,
     config.globalRoot,
     database.dreaming,
     () => mcpClients.invalidateAll(),
+    () => dreamingWorker?.isActive() ?? false,
   );
   mcpOAuth = new McpOAuthService(config, mcpServers, protectedLocalPorts);
   const mcpDiagnostics = new McpDiagnosticsService(mcpServers, mcpClients, new McpDiscovery());
@@ -149,7 +151,6 @@ export async function createServer(config: HarnessConfig = loadHarnessConfig()) 
   const broker = new SessionEventBroker();
   const boardTasks = new BoardTaskService(database.boardTasks, database.workspaces, eventStore);
   const sessionEvents = new SessionEventService(database.sessions, eventStore, broker, boardTasks);
-  let dreamingWorker: DreamingWorkerHost | undefined;
   // Run 开始在事件写入前登记，结束在 JSONL 持久化后进入待分析状态。
   sessionEvents.setRunLifecycleObserver((event, phase) => {
     if (!event.runId) return;

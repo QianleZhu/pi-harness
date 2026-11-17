@@ -36,7 +36,12 @@ export async function registerAppSettingsRoutes(
     {
       schema: {
         body: UpdateAppSettingsDtoSchema,
-        response: { 200: AppSettingsVoSchema, 403: ApiErrorVoSchema, 500: ApiErrorVoSchema },
+        response: {
+          200: AppSettingsVoSchema,
+          403: ApiErrorVoSchema,
+          409: ApiErrorVoSchema,
+          500: ApiErrorVoSchema,
+        },
       },
     },
     controller.update,

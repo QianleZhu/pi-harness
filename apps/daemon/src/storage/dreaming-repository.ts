@@ -241,6 +241,26 @@ export class SqliteDreamingRepository {
     }
   }
 
+  // 无需更新记忆时原子完成整批 Run 并清除候选。
+  public completeConsolidation(runIds: readonly string[], updatedAt: number): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const update = this.database.prepare(
+        "UPDATE dreaming_runs SET status = ?, candidates_json = NULL, updated_at = ? WHERE run_id = ? AND status = ?",
+      );
+      for (const runId of runIds) {
+        if (
+          update.run(RunStatus.COMPLETED, updatedAt, runId, RunStatus.CONSOLIDATING).changes !== 1
+        )
+          throw new Error("Dreaming batch is not consolidating");
+      }
+      this.database.exec("COMMIT");
+    } catch (error: unknown) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   // 查询尚未观察到结束事件的 Run，供启动恢复核对 JSONL。
   public listWaitingRuns(): DreamingRunRecord[] {
     const rows = this.database

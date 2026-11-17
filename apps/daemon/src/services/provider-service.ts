@@ -36,7 +36,7 @@ import {
   type ProviderVo,
 } from "../vo/provider-vo.js";
 
-const ProviderErrorCode = {
+export const ProviderErrorCode = {
   BUILT_IN_READ_ONLY: "BUILT_IN_PROVIDER_READ_ONLY",
   CONNECTION_FAILED: "PROVIDER_CONNECTION_FAILED",
   DISABLED: "PROVIDER_DISABLED",

@@ -146,12 +146,7 @@ export class AgentManager {
         isSkillEnabled: this.isSkillEnabled,
         workspaceRoot: input.workspaceRoot,
       }),
-      this.memory.buildContext(
-        input.userInput.prompt,
-        input.workspaceId,
-        undefined,
-        memorySnapshot,
-      ),
+      this.memory.buildContext(input.workspaceId, undefined, memorySnapshot),
     ]);
     const prompts = buildSystemPrompts(workspaceContext, input.workspaceRoot);
     const preparedInput = {

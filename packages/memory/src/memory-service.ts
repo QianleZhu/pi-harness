@@ -143,7 +143,6 @@ export interface DreamingReader {
 export interface MemoryRuntime {
   captureSnapshot(workspaceId: string): RunMemorySnapshot | null;
   buildContext(
-    query: string,
     workspaceId: string,
     signal?: AbortSignal,
     snapshot?: RunMemorySnapshot | null,
@@ -203,8 +202,6 @@ const HYBRID_CANDIDATE_MULTIPLIER = 4;
 const HYBRID_RRF_K = 60;
 // Keep lexical hits ahead of semantic-only candidates within the public 50-result limit.
 const KEYWORD_WEIGHT = 1.1;
-const MAX_CONTEXT_MEMORIES = 20;
-const MAX_CONTEXT_CHARACTERS = 8_000;
 const MAX_SEMANTIC_SCORE_DROP = 0.03;
 const MIN_HYBRID_CANDIDATES = 40;
 const PROFILE_FACETS = Object.values(UserProfileFacet);
@@ -549,32 +546,20 @@ export class MemoryService implements MemoryRuntime {
     }
   }
 
+  // 使用 Run 固定的 Wiki 上下文，不在启动时检索用户提问。
   public async buildContext(
-    query: string,
     workspaceId: string,
     signal?: AbortSignal,
     snapshot?: RunMemorySnapshot | null,
   ): Promise<string> {
     this.assertWorkspace(workspaceId);
     const settings = this.repository.getSettings();
-    const visible =
-      settings.useMemories && query.trim()
-        ? await this.search(query, workspaceId, MAX_CONTEXT_MEMORIES, signal, snapshot)
-        : [];
-    const selected: MemoryRecord[] = [];
-    let characters = 0;
-    for (const memory of visible.slice(0, MAX_CONTEXT_MEMORIES)) {
-      if (characters + memory.content.length > MAX_CONTEXT_CHARACTERS) break;
-      selected.push(memory);
-      characters += memory.content.length;
-    }
     const wikiContext = settings.useMemories
       ? await this.readWiki(workspaceId, "context.md", signal, snapshot)
       : null;
-    // 异步检索期间开关可能发生变化，关闭后不将已读取的内容注入 Run。
+    // 读取期间开关可能发生变化，关闭后不注入已读取的内容。
     const currentSettings = this.repository.getSettings();
     return buildMemoryContextPrompt(
-      currentSettings.useMemories ? selected : [],
       currentSettings,
       currentSettings.useMemories ? wikiContext : null,
     );

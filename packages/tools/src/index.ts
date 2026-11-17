@@ -42,6 +42,7 @@ export {
   type SkillType as SkillTypeValue,
 } from "./skills/types.js";
 export { ToolExecutionGuard } from "./tool-execution-guard.js";
+export { createDreamingReadTools } from "./tools/dreaming/read-memory.js";
 export * from "./tools/index.js";
 export {
   extractDocumentText,

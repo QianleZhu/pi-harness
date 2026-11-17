@@ -84,6 +84,18 @@ export class SqliteDreamingRepository {
     return { providerId: value.providerId, modelId: value.modelId };
   }
 
+  // 保存或清除 Dreaming 专用模型。
+  public setModel(model: { providerId: string; modelId: string } | null, updatedAt: number): void {
+    if (model === null) {
+      this.database.prepare("DELETE FROM app_settings WHERE key = 'dreaming_model'").run();
+      return;
+    }
+    this.database
+      .prepare(`INSERT INTO app_settings (key, value, updated_at) VALUES ('dreaming_model', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`)
+      .run(JSON.stringify(model), updatedAt);
+  }
+
   // 在 Run 开始时记录启用代次，供结束时判断是否跨越开关边界。
   public recordRunStart(input: {
     runId: string;

@@ -83,33 +83,6 @@ function createSaveTool(
   };
 }
 
-function createLearnTool(
-  memory: MemoryRuntime,
-  sessionId: string,
-  workspaceId: string,
-): AgentTool<typeof CreateMemoryParameters> {
-  return {
-    description:
-      "从对话中学习并保存可跨 Session 复用的稳定偏好或事实。个人记忆应设置 profileFacet；仅在从对话中学习开关开启且内容长期有效时使用，不得保存秘密、一次性任务状态或工作区已有明确规则。",
-    executionMode: "sequential",
-    label: "Learn memory",
-    name: "learn_memory",
-    parameters: CreateMemoryParameters,
-    async execute(_toolCallId, input, signal) {
-      return textResult(
-        await memory.createLearnedFromSession(
-          {
-            ...input,
-            sessionId,
-            workspaceId,
-          },
-          signal,
-        ),
-      );
-    },
-  };
-}
-
 function createUpdateTool(
   memory: MemoryRuntime,
   workspaceId: string,
@@ -189,7 +162,6 @@ export function createMemoryToolRegistrations(
   workspaceId: string,
 ): readonly MemoryToolRegistration[] {
   const search = createSearchTool(memory, workspaceId);
-  const learn = createLearnTool(memory, sessionId, workspaceId);
   const save = createSaveTool(memory, sessionId, workspaceId);
   const update = createUpdateTool(memory, workspaceId);
   const remove = createDeleteTool(memory, workspaceId);
@@ -199,28 +171,6 @@ export function createMemoryToolRegistrations(
       source: MEMORY_TOOL_SOURCE,
       timeoutMs: TOOL_TIMEOUT_MS,
       tool: search,
-    },
-    {
-      policy: {
-        allowInFullAccess: true,
-        permission: ToolPermission.USER_APPROVAL,
-        resolveGrant(args) {
-          if (!Value.Check(CreateMemoryParameters, args)) {
-            throw new Error("MEMORY_INVALID: 无效记忆参数");
-          }
-          const settings = memory.getSettings();
-          return {
-            fingerprint: JSON.stringify(args),
-            isGranted: settings.useMemories && settings.generateMemories,
-            risk: "该内容会直接保存为长期记忆，并在适用范围内用于后续对话。",
-            summary: "从对话中学习记忆",
-            target: args.content,
-          };
-        },
-      },
-      source: MEMORY_TOOL_SOURCE,
-      timeoutMs: TOOL_TIMEOUT_MS,
-      tool: learn,
     },
     {
       policy: memoryMutationPolicy(

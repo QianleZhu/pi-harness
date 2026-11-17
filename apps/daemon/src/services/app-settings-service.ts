@@ -17,6 +17,7 @@ import type {
   DefaultModelSetting,
   FileOpenApplicationSetting,
 } from "../storage/database.js";
+import type { SqliteDreamingRepository } from "../storage/dreaming-repository.js";
 import { readMacApplicationIconByBundleId } from "../utils/mac-application-icon.js";
 
 export interface AppSettings {
@@ -24,6 +25,7 @@ export interface AppSettings {
   busySubmitBehavior: BusySubmitBehavior;
   computerUseAllowedApps: ComputerUseAllowedApp[];
   defaultModel: DefaultModelSetting | null;
+  dreamingModel: { providerId: string; modelId: string } | null;
   fileOpenApplication: Omit<FileOpenApplicationSetting, "path"> | null;
   fileOpenMode: FileOpenMode;
   isSubAgentEnabled: boolean;
@@ -38,6 +40,7 @@ export class AppSettingsService {
   public constructor(
     private readonly settings: AppSettingRepository,
     private readonly globalRoot: string,
+    private readonly dreaming: SqliteDreamingRepository,
     private readonly onExecutionPolicyChanged: () => Promise<void>,
   ) {}
 
@@ -49,6 +52,7 @@ export class AppSettingsService {
       busySubmitBehavior: this.settings.getBusySubmitBehavior(),
       computerUseAllowedApps: this.settings.getComputerUseAllowedApps(),
       defaultModel: this.settings.getDefaultModel(),
+      dreamingModel: this.dreaming.getModel(),
       fileOpenApplication: fileOpenApplication
         ? { iconDataUrl: fileOpenApplication.iconDataUrl, name: fileOpenApplication.name }
         : null,
@@ -77,6 +81,9 @@ export class AppSettingsService {
     }
     if (input.defaultModel !== undefined) {
       this.settings.setDefaultModel(input.defaultModel, updatedAt);
+    }
+    if (input.dreamingModel !== undefined) {
+      this.dreaming.setModel(input.dreamingModel, updatedAt);
     }
     if (input.fileOpenMode !== undefined) {
       this.settings.setFileOpenMode(input.fileOpenMode, updatedAt);

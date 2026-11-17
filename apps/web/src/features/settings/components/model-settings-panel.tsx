@@ -180,6 +180,63 @@ export function ModelSettingsPanel() {
             />
           )}
         </SettingsRow>
+        <SettingsRow
+          description="用于后台记忆分析和整理；未选择时不会执行 Dreaming。"
+          title="Dreaming 模型"
+        >
+          {providersQuery.isPending || isLoading ? (
+            <Skeleton
+              aria-label="正在加载 Dreaming 模型"
+              className="h-10 w-full rounded-xl @xl/settings:w-56"
+            />
+          ) : (
+            <div className="flex items-center gap-2">
+              <ModelPicker
+                compactMobile={false}
+                isDisabled={isSaving("dreamingModel")}
+                providers={enabledProviders}
+                selectedModelKey={
+                  settings?.dreamingModel
+                    ? createModelSelectionKey(
+                        settings.dreamingModel.providerId,
+                        settings.dreamingModel.modelId,
+                      )
+                    : null
+                }
+                onModelChange={(key) => {
+                  const provider = enabledProviders.find((item) =>
+                    item.models.some((model) => createModelSelectionKey(item.id, model.id) === key),
+                  );
+                  const model = provider?.models.find(
+                    (item) => createModelSelectionKey(provider.id, item.id) === key,
+                  );
+                  if (!provider || !model) return;
+                  void updateSettings({
+                    dreamingModel: { providerId: provider.id, modelId: model.id },
+                  }).catch((error: unknown) => {
+                    toast.danger(error instanceof Error ? error.message : "保存 Dreaming 模型失败");
+                  });
+                }}
+              />
+              {settings?.dreamingModel ? (
+                <Button
+                  size="sm"
+                  variant="tertiary"
+                  isDisabled={isSaving("dreamingModel")}
+                  onPress={() => {
+                    void updateSettings({ dreamingModel: null }).catch((error: unknown) => {
+                      toast.danger(
+                        error instanceof Error ? error.message : "清除 Dreaming 模型失败",
+                      );
+                    });
+                  }}
+                >
+                  清除
+                </Button>
+              ) : null}
+            </div>
+          )}
+        </SettingsRow>
       </div>
 
       <div className="mt-8 flex items-center justify-between gap-4">

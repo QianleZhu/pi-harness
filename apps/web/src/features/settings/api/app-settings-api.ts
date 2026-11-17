@@ -17,6 +17,11 @@ const ApprovalPolicySchema = Type.Union([
   Type.Literal(ApprovalPolicy.FULL_ACCESS),
 ]);
 
+const DreamingModelSettingSchema = Type.Object({
+  modelId: Type.String({ minLength: 1 }),
+  providerId: Type.String({ minLength: 1 }),
+});
+
 const DefaultModelSettingSchema = Type.Object({
   modelId: Type.String({ minLength: 1 }),
   providerId: Type.String({ minLength: 1 }),
@@ -85,6 +90,7 @@ const AppSettingsSchema = Type.Object({
     { maxItems: 1_000 },
   ),
   defaultModel: Type.Union([DefaultModelSettingSchema, Type.Null()]),
+  dreamingModel: Type.Union([DreamingModelSettingSchema, Type.Null()]),
   fileOpenApplication: Type.Union([
     Type.Object({
       iconDataUrl: Type.Union([
@@ -110,6 +116,7 @@ const UpdateAppSettingsSchema = Type.Object({
     Type.Union([Type.Literal(BusySubmitBehavior.QUEUE), Type.Literal(BusySubmitBehavior.STEER)]),
   ),
   defaultModel: Type.Optional(DefaultModelSettingSchema),
+  dreamingModel: Type.Optional(Type.Union([DreamingModelSettingSchema, Type.Null()])),
   isSubAgentEnabled: Type.Optional(Type.Boolean()),
   fileOpenMode: Type.Optional(
     Type.Union([Type.Literal(FileOpenMode.ALWAYS), Type.Literal(FileOpenMode.ASK)]),

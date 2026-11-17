@@ -25,6 +25,7 @@ import { registerWorkspaceRoutes } from "../routes/workspace-routes.js";
 import { AppSettingsService } from "../services/app-settings-service.js";
 import { BoardTaskService } from "../services/board-task-service.js";
 import { ComputerUsePermissionService } from "../services/computer-use-permission-service.js";
+import { DreamingReaderService } from "../services/dreaming-reader.js";
 import { DreamingWorkerHost } from "../services/dreaming-worker-host.js";
 import { FileOpenService } from "../services/file-open-service.js";
 import { HumanInteractionService } from "../services/human-interaction-service.js";
@@ -101,8 +102,11 @@ export async function createServer(config: HarnessConfig = loadHarnessConfig()) 
     async (mcpServer) =>
       (await skillConnections?.invalidatePluginAppCredential(mcpServer)) ?? false,
   );
-  const appSettings = new AppSettingsService(database.appSettings, config.globalRoot, () =>
-    mcpClients.invalidateAll(),
+  const appSettings = new AppSettingsService(
+    database.appSettings,
+    config.globalRoot,
+    database.dreaming,
+    () => mcpClients.invalidateAll(),
   );
   mcpOAuth = new McpOAuthService(config, mcpServers, protectedLocalPorts);
   const mcpDiagnostics = new McpDiagnosticsService(mcpServers, mcpClients, new McpDiscovery());
@@ -194,17 +198,27 @@ export async function createServer(config: HarnessConfig = loadHarnessConfig()) 
   );
   providers.setAvailabilityObserver(() => dreamingWorker?.providersChanged());
   const localMemoryEmbedder = new LocalMemoryEmbedder(config.globalRoot);
-  const memories = new MemoryService(database.memories, {
-    modelId: localMemoryEmbedder.modelId,
-    embed: async (purpose, inputs, signal) => {
-      try {
-        return await localMemoryEmbedder.embed(purpose, inputs, signal);
-      } catch (error: unknown) {
-        server.log.warn({ err: error }, "Local memory embedding unavailable");
-        throw error;
-      }
+  const memories = new MemoryService(
+    database.memories,
+    {
+      modelId: localMemoryEmbedder.modelId,
+      embed: async (purpose, inputs, signal) => {
+        try {
+          return await localMemoryEmbedder.embed(purpose, inputs, signal);
+        } catch (error: unknown) {
+          server.log.warn({ err: error }, "Local memory embedding unavailable");
+          throw error;
+        }
+      },
     },
-  });
+    new DreamingReaderService(
+      config.globalRoot,
+      database.dreaming,
+      database.memories,
+      database.sessions,
+      eventStore,
+    ),
+  );
   agents = new AgentManager(
     sessionEvents.handle,
     interactions.requestApproval,

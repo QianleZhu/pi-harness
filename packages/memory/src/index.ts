@@ -1,6 +1,7 @@
 export * from "./contract.js";
 export * from "./dreaming.js";
 export {
+  type DreamingReader,
   getDefaultMemorySettings,
   type MemoryEmbedder,
   type MemoryEmbedding,

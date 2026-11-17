@@ -22,7 +22,6 @@ export const MemoryErrorCode = {
   EMBEDDING_FAILED: "MEMORY_EMBEDDING_FAILED",
   INVALID: "MEMORY_INVALID",
   NOT_FOUND: "MEMORY_NOT_FOUND",
-  LEARNING_DISABLED: "MEMORY_LEARNING_DISABLED",
   WORKSPACE_NOT_FOUND: "MEMORY_WORKSPACE_NOT_FOUND",
 } as const;
 export type MemoryErrorCode = (typeof MemoryErrorCode)[keyof typeof MemoryErrorCode];
@@ -96,19 +95,33 @@ export interface MemoryRepository {
   updateSettings(settings: MemorySettings, updatedAt: number): void;
 }
 
+// 主 Agent 读取已发布的 Dreaming 内容，具体存储由 daemon 提供。
+export interface DreamingReader {
+  readWiki(workspaceId: string, name: string, signal?: AbortSignal): Promise<string | null>;
+  readRevision(workspaceId: string, memoryId: string, revision: number): unknown;
+  readSource(
+    workspaceId: string,
+    memoryId: string,
+    revision: number,
+    sessionId: string,
+    eventId: string,
+    signal?: AbortSignal,
+  ): Promise<unknown>;
+}
+
 export interface MemoryRuntime {
   buildContext(query: string, workspaceId: string, signal?: AbortSignal): Promise<string>;
-  createFromSession(
-    input: {
-      content: string;
-      profileFacet?: UserProfileFacetValue | null;
-      scope: MemoryScopeValue;
-      sessionId: string;
-      workspaceId: string;
-    },
+  readWiki(workspaceId: string, name: string, signal?: AbortSignal): Promise<string | null>;
+  readRevision(workspaceId: string, memoryId: string, revision: number): unknown;
+  readSource(
+    workspaceId: string,
+    memoryId: string,
+    revision: number,
+    sessionId: string,
+    eventId: string,
     signal?: AbortSignal,
-  ): Promise<MemoryRecord>;
-  createLearnedFromSession(
+  ): Promise<unknown>;
+  createFromSession(
     input: {
       content: string;
       profileFacet?: UserProfileFacetValue | null;
@@ -194,7 +207,37 @@ export class MemoryService implements MemoryRuntime {
   public constructor(
     private readonly repository: MemoryRepository,
     private readonly embedder: MemoryEmbedder,
+    private readonly dreaming?: DreamingReader,
   ) {}
+
+  // 关闭记忆使用时不读取已发布的 Wiki 或来源。
+  public async readWiki(
+    workspaceId: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<string | null> {
+    if (!this.repository.getSettings().useMemories || !this.dreaming) return null;
+    return this.dreaming.readWiki(workspaceId, name, signal);
+  }
+
+  // 只读取当前工作区允许访问的记忆版本。
+  public readRevision(workspaceId: string, memoryId: string, revision: number): unknown {
+    if (!this.repository.getSettings().useMemories || !this.dreaming) return null;
+    return this.dreaming.readRevision(workspaceId, memoryId, revision);
+  }
+
+  // 只读取记忆版本引用的会话事件。
+  public async readSource(
+    workspaceId: string,
+    memoryId: string,
+    revision: number,
+    sessionId: string,
+    eventId: string,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    if (!this.repository.getSettings().useMemories || !this.dreaming) return null;
+    return this.dreaming.readSource(workspaceId, memoryId, revision, sessionId, eventId, signal);
+  }
 
   public getState(): MemoryState {
     const memories = [...this.repository.list()];
@@ -233,25 +276,6 @@ export class MemoryService implements MemoryRuntime {
     signal?: AbortSignal,
   ): Promise<MemoryRecord> {
     return this.withMutation(() => this.createSessionMemory(input, signal));
-  }
-
-  public createLearnedFromSession(
-    input: {
-      content: string;
-      profileFacet?: UserProfileFacetValue | null;
-      scope: MemoryScopeValue;
-      sessionId: string;
-      workspaceId: string;
-    },
-    signal?: AbortSignal,
-  ): Promise<MemoryRecord> {
-    return this.withMutation(() => {
-      const settings = this.repository.getSettings();
-      if (!settings.useMemories || !settings.generateMemories) {
-        throw new MemoryError(MemoryErrorCode.LEARNING_DISABLED, "已暂停从对话中学习记忆");
-      }
-      return this.createSessionMemory(input, signal);
-    });
   }
 
   public update(
@@ -460,7 +484,10 @@ export class MemoryService implements MemoryRuntime {
       selected.push(memory);
       characters += memory.content.length;
     }
-    return buildMemoryContextPrompt(selected, settings);
+    const wikiContext = settings.useMemories
+      ? await this.readWiki(workspaceId, "context.md", signal)
+      : null;
+    return buildMemoryContextPrompt(selected, settings, wikiContext);
   }
 
   private async create(

@@ -6,6 +6,7 @@ import {
   CommandProcessEventKind,
   CommandProcessManager,
   type CommandProcessSnapshot,
+  createDreamingReadTools,
   createSubAgentToolRegistrations,
   createToolSearchTool,
   createWorkspaceToolRegistry,
@@ -348,6 +349,12 @@ export class AgentManager {
     toolContext.commandProcesses = commandProcesses;
     const toolRegistry = createWorkspaceToolRegistry(toolContext, skillRegistry, [
       ...createMemoryToolRegistrations(this.memory, input.sessionId, input.workspaceId),
+      ...createDreamingReadTools(this.memory, input.workspaceId).map((tool) => ({
+        policy: { permission: ToolPermission.READ_ONLY },
+        source: "memory",
+        timeoutMs: 30_000,
+        tool,
+      })),
       ...subAgentTools,
       {
         policy: { permission: ToolPermission.READ_ONLY },

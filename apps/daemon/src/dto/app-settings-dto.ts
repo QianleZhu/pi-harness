@@ -15,6 +15,11 @@ export const ApprovalPolicyDtoSchema = Type.Union([
   Type.Literal(ApprovalPolicy.FULL_ACCESS),
 ]);
 
+export const DreamingModelSettingDtoSchema = Type.Object({
+  modelId: Type.String({ maxLength: 200, minLength: 1 }),
+  providerId: Type.String({ maxLength: 200, minLength: 1 }),
+});
+
 export const DefaultModelSettingDtoSchema = Type.Object({
   modelId: Type.String({ maxLength: 200, minLength: 1 }),
   providerId: Type.String({ maxLength: 200, minLength: 1 }),
@@ -71,6 +76,7 @@ export const UpdateAppSettingsDtoSchema = Type.Object(
     busySubmitBehavior: Type.Optional(BusySubmitBehaviorDtoSchema),
     isSubAgentEnabled: Type.Optional(Type.Boolean()),
     defaultModel: Type.Optional(DefaultModelSettingDtoSchema),
+    dreamingModel: Type.Optional(Type.Union([DreamingModelSettingDtoSchema, Type.Null()])),
     fileOpenMode: Type.Optional(FileOpenModeDtoSchema),
     outputDetail: Type.Optional(OutputDetailDtoSchema),
     reasoningSummary: Type.Optional(ReasoningSummaryDtoSchema),

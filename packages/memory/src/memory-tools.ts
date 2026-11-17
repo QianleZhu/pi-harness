@@ -7,6 +7,8 @@ import type { MemoryRuntime, RunMemorySnapshot } from "./memory-service.js";
 
 const TOOL_TIMEOUT_MS = 30_000;
 const MEMORY_TOOL_SOURCE = "memory";
+// 记忆检索工具名称供 Agent 工具注册和子 Agent 授权共用。
+export const SEARCH_MEMORIES_TOOL_NAME = "search_memories";
 
 const SearchMemoriesParameters = Type.Object({
   limit: Type.Optional(Type.Integer({ maximum: 50, minimum: 1 })),
@@ -49,7 +51,7 @@ function createSearchTool(
       "检索当前 Workspace 可见的长期记忆，返回记忆 ID、revision、scope 和内容。上下文中没有所需记忆时使用。",
     executionMode: "parallel",
     label: "Search memories",
-    name: "search_memories",
+    name: SEARCH_MEMORIES_TOOL_NAME,
     parameters: SearchMemoriesParameters,
     async execute(_toolCallId, input, signal) {
       return textResult(

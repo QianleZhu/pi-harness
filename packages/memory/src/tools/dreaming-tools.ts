@@ -12,6 +12,7 @@ import {
   type MemoryRevisionSource,
 } from "../dreaming.js";
 import type { MemoryRepository, MemoryService } from "../memory-service.js";
+import { SEARCH_MEMORIES_TOOL_NAME } from "../memory-tools.js";
 import { resolveDreamingRevision } from "../utils/dreaming-revision.js";
 
 const EvidenceSchema = Type.Union(
@@ -118,7 +119,7 @@ export function createDreamingTools(options: {
   };
   const tools: AgentTool[] = [
     {
-      name: "search_memories",
+      name: SEARCH_MEMORIES_TOOL_NAME,
       label: "Search memories",
       description: "Search workspace memories.",
       executionMode: "sequential",

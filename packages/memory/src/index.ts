@@ -15,7 +15,11 @@ export {
   type StoredMemoryInput,
   type VisibleMemoryEmbedding,
 } from "./memory-service.js";
-export { createMemoryToolRegistrations, type MemoryToolRegistration } from "./memory-tools.js";
+export {
+  createMemoryToolRegistrations,
+  type MemoryToolRegistration,
+  SEARCH_MEMORIES_TOOL_NAME,
+} from "./memory-tools.js";
 export { DREAMING_ANALYSIS_PROMPT } from "./prompts/dreaming-analysis-prompt.js";
 export { DREAMING_CONSOLIDATION_PROMPT } from "./prompts/dreaming-consolidation-prompt.js";
 export { GLOBAL_DREAMING_PROMPT } from "./prompts/global-dreaming-prompt.js";

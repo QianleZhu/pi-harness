@@ -7,5 +7,6 @@ When a candidate supports a durable user fact or reusable experience beyond this
 If no candidate warrants a memory change or a new source for an existing memory, do not create or revise memories or rewrite the wiki; finish without changes.
 Use draft_memory to create or revise memories; the returned id and revision identify the draft.
 When wiki changes are needed, write index.md, context.md and topic Markdown with write_wiki. Cite supporting memories using [memory:ID@REVISION].
+When updating topics, read related existing topics and add cross-topic links only for meaningful relationships such as dependencies, prerequisites or troubleshooting paths. Use [topic title](topic-file.md) and briefly explain the relationship so a future agent can decide when to follow it. Link only to files in this Wiki. Do not force links or reciprocal links when no useful relationship exists.
 The index must navigate topics, context must point to the index. Do not include secrets or invent evidence.
 Finish after all drafts are ready.`;

@@ -9,6 +9,7 @@ import type {
   StreamFn,
 } from "@earendil-works/pi-agent-core";
 import { type Api, clampThinkingLevel, type Model, type Usage } from "@earendil-works/pi-ai";
+import { SEARCH_MEMORIES_TOOL_NAME } from "@pi-harness/memory";
 import { ToolPermission } from "@pi-harness/policy";
 import {
   createFindSkillTool,
@@ -75,6 +76,7 @@ const EXPLORER_TOOLS = new Set([
   "search_text",
   "web_search",
   "web_fetch",
+  SEARCH_MEMORIES_TOOL_NAME,
 ]);
 const EXCLUDED_CHILD_TOOLS = new Set([
   "update_plan",

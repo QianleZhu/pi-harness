@@ -11,6 +11,8 @@ import type { SqliteMemoryRepository } from "../storage/memory-repository.js";
 
 export const ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const REFERENCE_PATTERN = /\[memory:([0-9a-f-]{36})@(\d+)\]/gi;
+// Wiki 内部文档链接使用与读取工具相同的单层文件名。
+const WIKI_LINK_PATTERN = /\[[^\]\n]+\]\(([^\s)]+)\)/g;
 
 // 清理数据库没有引用的 Wiki 目录，已发布目录保持可读。
 export async function cleanupDreamingDirectories(
@@ -71,6 +73,18 @@ export function validateWiki(
   const refs = new Map<string, { memoryId: string; revision: number; isCurrent: boolean }>();
   for (const [name, text] of files) {
     if (!DREAMING_WIKI_NAME_PATTERN.test(name)) throw new Error("Invalid Wiki filename");
+    // 仅校验正文链接；代码示例中的链接文本不代表 Wiki 导航。
+    const prose = text
+      .replaceAll(/^[ \t]{0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^[ \t]{0,3}\1[ \t]*$/gm, "")
+      .replaceAll(/`+[^`\n]*`+/g, "");
+    for (const link of prose.matchAll(WIKI_LINK_PATTERN)) {
+      const target = link[1]?.split("#", 1)[0];
+      if (!target || !/\.md$/i.test(target) || /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(target))
+        continue;
+      const targetName = target.startsWith("./") ? target.slice(2) : target;
+      if (!DREAMING_WIKI_NAME_PATTERN.test(targetName) || !files.has(targetName))
+        throw new Error("Wiki linked document not found");
+    }
     if (name !== "context.md" && name !== "index.md") {
       topicsLength += text.length;
       if (!index.includes(name) || !text.match(REFERENCE_PATTERN))

@@ -62,7 +62,8 @@ try {
   assert.equal(
     (
       await evaluateToolCall({
-        approvalPolicy: ApprovalPolicy.FULL_ACCESS,
+        // 自动批准模式下，清理整个工作区仍需用户逐次确认。
+        approvalPolicy: ApprovalPolicy.AUTO_APPROVE,
         arguments: { command: "rm -rf ." },
         policy: { permission: ToolPermission.SHELL },
         workspaceRoot,
@@ -98,17 +99,14 @@ try {
   const node = await run(`${quote(process.execPath)} -e 'process.stdout.write("node-ok")'`);
   assert.equal(node.exitCode, 0, node.all);
   assert.equal(node.all, "node-ok");
-  for (const command of [
-    `cat ${quote(sibling)}`,
-    "cat escape",
-    "cat private/credential",
-    `printf bad > ${quote(sibling)}`,
-    "printf bad > private/credential",
-  ]) {
+  for (const command of [`cat ${quote(sibling)}`, "cat escape", "cat private/credential"]) {
     const result = await run(command);
     assert.equal(result.failed, true, command);
     assert.doesNotMatch(result.all ?? "", /outside-secret|private-secret/);
   }
+  // Bubblewrap 可能允许写入覆盖隐藏目录的临时文件系统，验证宿主文件没有被改动。
+  await run(`printf bad > ${quote(sibling)}`);
+  await run("printf bad > private/credential");
   assert.equal(await readFile(sibling, "utf8"), "outside-secret");
   assert.equal(await readFile(join(privateRoot, "credential"), "utf8"), "private-secret");
   const skillDirectory = join(root, "skills", "example");

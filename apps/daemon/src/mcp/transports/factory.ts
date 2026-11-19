@@ -11,6 +11,7 @@ import { prepareMcpProcessLaunch } from "../utils/process-launch.js";
 import { createMcpHttpFetch } from "./http-fetch.js";
 import { McpStdioTransport } from "./stdio.js";
 
+/** 根据执行权限和连接类型创建 MCP transport。 */
 export function createMcpTransportFactory(
   verifyContext: (context: McpConnectionContext) => void,
   createAuthProvider: (context: McpConnectionContext) => AuthProvider,
@@ -24,8 +25,9 @@ export function createMcpTransportFactory(
     verifyContext(context);
     if (context.server.config.transport === McpTransport.STDIO) {
       const launch = await prepareMcpProcessLaunch(context, signal);
-      const sandboxPolicy =
-        launch.hasHostAccess || isFullAccess() ? null : await readSandboxPolicy(globalRoot, signal);
+      // Windows SRT 无法转发 stdin，本地 stdio 服务使用 daemon 的宿主账户。
+      const useHostProcess = process.platform === "win32" || launch.hasHostAccess || isFullAccess();
+      const sandboxPolicy = useHostProcess ? null : await readSandboxPolicy(globalRoot, signal);
       return new McpStdioTransport(
         launch,
         sandboxPolicy === null

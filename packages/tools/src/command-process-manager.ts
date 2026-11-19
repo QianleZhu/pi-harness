@@ -452,11 +452,13 @@ export class CommandProcessManager {
       ...(input.signal === undefined ? {} : { signal: input.signal }),
       workspaceRoot,
     });
-    return superviseProcess({
+    const managed = {
       child: sandboxed.process,
       close: sandboxed.close,
       getViolations: sandboxed.getViolations ?? (() => []),
-    });
+    };
+    // Windows worker 在 IPC 断开时先回收 Job Object，再撤回 SRT 授权。
+    return process.platform === "win32" ? managed : superviseProcess(managed);
   }
 
   private observe(record: CommandProcessRecord): void {

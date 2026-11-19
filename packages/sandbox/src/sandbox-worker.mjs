@@ -1,6 +1,14 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { SandboxManager, SandboxRuntimeConfigSchema } from "@anthropic-ai/sandbox-runtime";
+import { once } from "node:events";
+import { rm } from "node:fs/promises";
+import { createServer } from "node:net";
+import { isAbsolute } from "node:path";
+import {
+  parseWindowsBinShell,
+  SandboxManager,
+  SandboxRuntimeConfigSchema,
+} from "@anthropic-ai/sandbox-runtime";
 import { getOneMessage, sendMessage } from "execa";
 
 /**
@@ -19,6 +27,31 @@ import { getOneMessage, sendMessage } from "execa";
 /** @param {readonly string[]} values */
 const quote = (values) =>
   values.map((value) => (value === "" ? "''" : `'${value.replaceAll("'", `'"'"'`)}'`)).join(" ");
+
+const isWindows = process.platform === "win32";
+const stopController = new AbortController();
+/** @type {import("node:child_process").ChildProcess | undefined} */
+let child;
+/** @type {string | undefined} */
+let temporaryRoot;
+
+/** 结束 Windows broker，由原生 Job Object 回收目标进程树。 */
+function stopWindowsProcess() {
+  stopController.abort();
+  child?.kill("SIGKILL");
+}
+
+if (isWindows) {
+  process.once("disconnect", stopWindowsProcess);
+  process.on("message", (message) => {
+    if (message && typeof message === "object" && "type" in message && message.type === "stop") {
+      stopWindowsProcess();
+    }
+  });
+  // daemon 被关闭时，标准流也可能在 IPC 断开前先关闭。
+  process.stdout.on("error", stopWindowsProcess);
+  process.stderr.on("error", stopWindowsProcess);
+}
 
 // 配置通过父进程管道传入，不读取 workspace 或用户的 SRT 配置。
 let stage = "input";
@@ -58,8 +91,9 @@ try {
     throw new Error("沙箱输入无效");
   }
   const sandboxInput = /** @type {SandboxWorkerInput} */ (input);
+  if (isWindows) temporaryRoot = process.env.TEMP;
   const config = SandboxRuntimeConfigSchema.parse(sandboxInput.config);
-  if (sandboxInput.mode === "process") {
+  if (sandboxInput.mode === "process" && !isWindows) {
     for (const [name, value] of Object.entries(sandboxInput.environment ?? {}))
       process.env[name] = value;
   }
@@ -80,6 +114,16 @@ try {
     process.env[credential.name] = credential.value;
   }
   stage = "initialization";
+  if (isWindows) {
+    // 读取授权绑定到同一个本地用户，直到 SRT 撤回授权前为当前 worker 独占。
+    const windowsLease = createServer((socket) => socket.destroy());
+    windowsLease.listen(String.raw`\\.\pipe\pi-harness-srt-windows`);
+    await once(windowsLease, "listening");
+    stopController.signal.throwIfAborted();
+    if (sandboxInput.environment?.PATH !== undefined) {
+      process.env.PATH = sandboxInput.environment.PATH;
+    }
+  }
   /** @param {{host: string, port: number | undefined}} request */
   const askNetwork = async ({ host, port }) => {
     const requestId = randomUUID();
@@ -101,16 +145,29 @@ try {
     );
   };
   await SandboxManager.initialize(config, askNetwork, true);
+  stopController.signal.throwIfAborted();
   stage = "configuration";
-  const command =
-    sandboxInput.mode === "process"
+  // Windows 直接传入程序与参数，保留 cmd.exe 的整段命令参数。
+  const isWindowsProcess = isWindows && sandboxInput.mode === "process";
+  const args = sandboxInput.args ?? [];
+  const windowsExecutable = isWindowsProcess
+    ? isAbsolute(sandboxInput.command)
+      ? sandboxInput.command
+      : sandboxInput.command.toLowerCase() === "cmd.exe"
+        ? parseWindowsBinShell("cmd").exe
+        : undefined
+    : undefined;
+  if (isWindowsProcess && !windowsExecutable) throw new Error("Windows 沙箱需要绝对程序路径");
+  const command = isWindowsProcess
+    ? (args.at(-1) ?? "")
+    : sandboxInput.mode === "process"
       ? quote([sandboxInput.command, ...(sandboxInput.args ?? [])])
       : sandboxInput.command;
   const { argv, env } = await SandboxManager.wrapWithSandboxArgv(
     command,
+    windowsExecutable ? { exe: windowsExecutable, args: args.slice(0, -1) } : undefined,
     undefined,
-    undefined,
-    undefined,
+    isWindows ? stopController.signal : undefined,
     process.cwd(),
     { commandId: sandboxInput.commandId, commandText: sandboxInput.command },
   );
@@ -121,33 +178,43 @@ try {
   }
   const executable = argv[0];
   if (executable === undefined) throw new Error("沙箱未返回可执行命令");
+  // 此版本 SRT 总会附加一个命令参数。无参数的程序只保留可执行文件。
+  if (isWindowsProcess && args.length === 0) argv.pop();
+  stopController.signal.throwIfAborted();
   stage = "execution";
-  const child = spawn(executable, argv.slice(1), {
+  child = spawn(executable, argv.slice(1), {
     cwd: process.cwd(),
     env,
     shell: false,
+    windowsHide: true,
     stdio:
-      sandboxInput.mode === "process" ? ["pipe", "pipe", "pipe"] : ["ignore", "inherit", "inherit"],
+      sandboxInput.mode === "process"
+        ? [isWindows ? "ignore" : "pipe", "pipe", "pipe"]
+        : ["ignore", "inherit", "inherit"],
   });
+  // 先监听退出，确保快速返回的进程也能到达清理阶段。
+  const exited = once(child, isWindows ? "close" : "exit");
+  void exited.catch(() => undefined);
+  await once(child, "spawn");
   if (sandboxInput.mode === "process") {
-    if (child.stdin === null || child.stdout === null || child.stderr === null) {
+    if (child.stdout === null || child.stderr === null || (!isWindows && child.stdin === null)) {
       throw new Error("沙箱进程管道不可用");
     }
-    process.stdin.pipe(child.stdin);
+    if (child.stdin) process.stdin.pipe(child.stdin);
     child.stdout.pipe(process.stdout);
     child.stderr.pipe(process.stderr);
   }
-  await sendMessage({ pid: child.pid, type: "sandbox-process" });
-  process.exitCode = await new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("exit", (code) => resolve(code ?? 1));
-  });
-  await sendMessage({
-    lines: SandboxManager.getSandboxViolationStore()
-      .getViolationsForCommand(sandboxInput.commandId)
-      .map(({ line }) => line),
-    type: "violations",
-  });
+  if (process.connected) await sendMessage({ pid: child.pid, type: "sandbox-process" });
+  const [exitCode] = await exited;
+  process.exitCode = exitCode ?? 1;
+  if (process.connected) {
+    await sendMessage({
+      lines: SandboxManager.getSandboxViolationStore()
+        .getViolationsForCommand(sandboxInput.commandId)
+        .map(({ line }) => line),
+      type: "violations",
+    });
+  }
 } catch (error) {
   const code =
     stage === "input"
@@ -162,10 +229,16 @@ try {
     error !== null &&
     "code" in error &&
     typeof error.code === "string" &&
-    /^[A-Z0-9_]+$/.test(error.code)
+    /^[a-z0-9_]+$/i.test(error.code)
       ? ` (${error.code})`
       : "";
-  process.stderr.write(`${code}${causeCode}: 沙箱在 ${stage} 阶段失败。\n`);
+  const message =
+    causeCode === " (EADDRINUSE)"
+      ? "已有 Windows 沙箱命令正在运行。"
+      : [" (not_provisioned)", " (reinstall_required)"].includes(causeCode)
+        ? "请运行项目文档中的 Windows SRT 安装命令。"
+        : `沙箱在 ${stage} 阶段失败。`;
+  process.stderr.write(`${code}${causeCode}: ${message}\n`);
   process.exitCode = 1;
 } finally {
   try {
@@ -173,6 +246,11 @@ try {
   } catch {
     process.stderr.write("SANDBOX_CLEANUP_FAILED: 沙箱资源清理失败。\n");
     process.exitCode = 1;
+  }
+  if (temporaryRoot) {
+    await rm(temporaryRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(
+      () => process.stderr.write("SANDBOX_CLEANUP_FAILED: 无法移除 Windows 沙箱临时目录。\n"),
+    );
   }
 }
 // 后台命令可能持有 stdout；父进程在收到 worker 退出后清理整个进程组。

@@ -1,10 +1,11 @@
 import { lstat, realpath } from "node:fs/promises";
-import { basename, dirname, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { invalidPath } from "../path-policy-error.js";
 
+/** 判断目标是否位于指定目录内，Windows 跨盘符的相对路径仍是绝对路径。 */
 export function isPathWithin(root: string, target: string): boolean {
   const pathFromRoot = relative(root, target);
-  return pathFromRoot === "" || (!pathFromRoot.startsWith(`..${sep}`) && pathFromRoot !== "..");
+  return !isAbsolute(pathFromRoot) && !pathFromRoot.startsWith(`..${sep}`) && pathFromRoot !== "..";
 }
 
 // 用于把路径转换为经过符号链接解析的真实绝对路径，供后续安全边界检查。

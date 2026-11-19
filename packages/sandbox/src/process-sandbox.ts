@@ -1,11 +1,16 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { type SandboxRuntimeConfig, VENDORED_SRT_WIN_EXE } from "@anthropic-ai/sandbox-runtime";
-import { resolveWorkspacePath, type SandboxCredential } from "@pi-harness/policy";
+import {
+  getWslVersion,
+  type SandboxRuntimeConfig,
+  VENDORED_SRT_WIN_EXE,
+} from "@anthropic-ai/sandbox-runtime";
+import { getApplySeccompBinaryPath } from "@anthropic-ai/sandbox-runtime/dist/sandbox/generate-seccomp-filter.js";
+import { isPathWithin, resolveWorkspacePath, type SandboxCredential } from "@pi-harness/policy";
 import { execa } from "execa";
 
 interface SandboxBoundaryInput {
@@ -57,6 +62,31 @@ export interface SandboxedProcess {
 }
 
 const ENVIRONMENT_NAMES = ["LANG", "LC_ALL", "PATH", "TERM"] as const;
+const WINDOWS_WORKER_ENVIRONMENT_NAMES = [
+  "LOCALAPPDATA",
+  "PATHEXT",
+  "ProgramData",
+  "SystemRoot",
+  "USERPROFILE",
+] as const;
+
+/** 在 WSL 中找出 Windows 文件系统的实际挂载路径。 */
+async function readWindowsMounts(): Promise<string[]> {
+  if (!getWslVersion()) return [];
+  const mountInfo = await readFile("/proc/self/mountinfo", "utf8");
+  return mountInfo.split("\n").flatMap((line) => {
+    const [mount, filesystem] = line.split(" - ");
+    const mountPath = mount?.split(" ")[4];
+    if (!mountPath || !filesystem) return [];
+    if (!filesystem.startsWith("drvfs ") && !filesystem.includes("aname=drvfs;")) return [];
+    // mountinfo 使用八进制转义表示挂载路径中的空格、制表符、换行和反斜杠。
+    return [
+      mountPath.replace(/\\([0-7]{3})/g, (_, code: string) =>
+        String.fromCharCode(Number.parseInt(code, 8)),
+      ),
+    ];
+  });
+}
 
 /**
  * 作用：
@@ -71,11 +101,28 @@ const ENVIRONMENT_NAMES = ["LANG", "LC_ALL", "PATH", "TERM"] as const;
  * 6、把 HOME、TMPDIR 指向临时目录。
  */
 async function prepareSandbox(input: SandboxBoundaryInput) {
+  const isWindows = process.platform === "win32";
+  const isWorkspaceWritable = input.isWorkspaceWritable !== false;
+  // 受保护路径相对于 daemon 的 cwd 解析，worker 会在 workspace 中启动。
+  const protectedPaths = input.protectedPaths.map((path) => resolve(path));
+  const windowsMounts = await readWindowsMounts();
   const workspaceRoot = await resolveWorkspacePath({
     workspaceRoot: input.workspaceRoot,
     path: ".",
-    protectedPaths: input.protectedPaths,
+    protectedPaths,
   });
+  // WSL 的 Windows 盘符在 Linux HOME 之外，隔离工具从 Linux 文件系统运行。
+  if (windowsMounts.some((root) => isPathWithin(root, workspaceRoot))) {
+    throw new Error("SANDBOX_WORKSPACE_UNAVAILABLE: WSL 沙箱需要 Linux 文件系统中的工作区");
+  }
+  // Linux 的 seccomp helper 在 Bubblewrap 内启动，安装目录可能位于被遮蔽的 HOME。
+  const seccompPath = process.platform === "linux" ? getApplySeccompBinaryPath() : null;
+  if (seccompPath && windowsMounts.some((root) => isPathWithin(root, seccompPath))) {
+    throw new Error("SANDBOX_RUNTIME_UNAVAILABLE: WSL 沙箱需要 Linux 文件系统中的项目依赖");
+  }
+  const readPaths = [dirname(process.execPath), ...(input.readPaths ?? [])].filter(
+    (path) => !windowsMounts.some((root) => isPathWithin(root, path)),
+  );
   const temporaryRoot = await mkdtemp(join(tmpdir(), "pi-harness-sandbox-"));
   // SRT 的 allow 不接受全局 `*`；空 allow 由 ask callback 放行，凭据目标仍需进入配置完成 SRT 校验。
   const allowedDomains =
@@ -92,17 +139,30 @@ async function prepareSandbox(input: SandboxBoundaryInput) {
       ...((input.credentials?.length ?? 0) > 0 ? { tlsTerminate: {} } : {}),
     },
     filesystem: {
-      denyRead: [homedir(), dirname(workspaceRoot), ...input.protectedPaths],
-      allowRead: [
-        workspaceRoot,
-        temporaryRoot,
-        dirname(process.execPath),
-        ...(input.readPaths ?? []),
+      // Windows 使用专用账户的 NTFS 访问权限作为读取基线，避免向整块盘或用户目录写 ACL。
+      denyRead: [
+        ...(isWindows ? [] : [homedir(), dirname(workspaceRoot)]),
+        ...protectedPaths,
+        ...windowsMounts,
       ],
-      allowWrite: [...(input.isWorkspaceWritable === false ? [] : [workspaceRoot]), temporaryRoot],
+      allowRead: [
+        // Windows 写授权已包含读取权限，避免每次对同一个目录重复添加和撤销读取 ACL。
+        ...(isWindows && isWorkspaceWritable ? [] : [workspaceRoot]),
+        ...(isWindows ? [] : [temporaryRoot]),
+        ...readPaths,
+        ...(seccompPath ? [seccompPath] : []),
+      ],
+      // Windows 目标进程使用 SRT 专用账户自己的临时目录。
+      allowWrite: [
+        ...(isWorkspaceWritable ? [workspaceRoot] : []),
+        ...(isWindows ? [] : [temporaryRoot]),
+      ],
       denyWrite: [
-        ...input.protectedPaths,
-        ...(process.platform === "win32" ? [VENDORED_SRT_WIN_EXE] : []),
+        ...protectedPaths,
+        ...windowsMounts,
+        ...(seccompPath ? [seccompPath] : []),
+        // pnpm 安装的可执行文件可能是硬链接，SRT 以目录 ACL 保护该 helper。
+        ...(isWindows ? [dirname(VENDORED_SRT_WIN_EXE)] : []),
       ],
     },
     ...((input.credentials?.length ?? 0) > 0
@@ -116,16 +176,14 @@ async function prepareSandbox(input: SandboxBoundaryInput) {
           },
         }
       : {}),
-    ...(process.platform === "win32"
-      ? { windows: { srtWin: { path: VENDORED_SRT_WIN_EXE } } }
-      : {}),
+    ...(isWindows ? { windows: { srtWin: { path: VENDORED_SRT_WIN_EXE } } } : {}),
   };
   return {
     config,
     environment: {
       ...Object.fromEntries(
-        ENVIRONMENT_NAMES.flatMap((name) =>
-          process.env[name] === undefined ? [] : [[name, process.env[name]]],
+        [...ENVIRONMENT_NAMES, ...(isWindows ? WINDOWS_WORKER_ENVIRONMENT_NAMES : [])].flatMap(
+          (name) => (process.env[name] === undefined ? [] : [[name, process.env[name]]]),
         ),
       ),
       HOME: temporaryRoot,
@@ -142,6 +200,9 @@ async function prepareSandbox(input: SandboxBoundaryInput) {
 /** 独立进程持有 SRT 的全局管理器，避免并发 workspace 串用文件权限和网络代理。 */
 export async function runSandboxedCommand(input: SandboxCommandInput) {
   input.signal?.throwIfAborted();
+  if (process.platform === "win32") {
+    throw new Error("SANDBOX_PLATFORM_UNAVAILABLE: Windows 使用受监管的沙箱命令入口");
+  }
   const { config, environment, temporaryRoot, workspaceRoot } = await prepareSandbox(input);
   try {
     const subprocess = execa(
@@ -171,25 +232,15 @@ export async function runSandboxedCommand(input: SandboxCommandInput) {
     );
     let hasStoppedGroup = false;
     let hasCleanupError = false;
-    let sandboxProcessPid: number | undefined;
     let violations: string[] = [];
     // 正常退出也清理后台子进程；进程组信号不依赖 Shell 是否主动转发。
     const stopGroup = () => {
       if (subprocess.pid === undefined || hasStoppedGroup) return;
       hasStoppedGroup = true;
-      const pids =
-        process.platform === "win32" ? [sandboxProcessPid, subprocess.pid] : [-subprocess.pid];
-      for (const pid of pids) {
-        if (pid === undefined) continue;
-        try {
-          process.kill(pid, "SIGKILL");
-        } catch (error: unknown) {
-          hasCleanupError ||= !(
-            error instanceof Error &&
-            "code" in error &&
-            error.code === "ESRCH"
-          );
-        }
+      try {
+        process.kill(-subprocess.pid, "SIGKILL");
+      } catch (error: unknown) {
+        hasCleanupError = !(error instanceof Error && "code" in error && error.code === "ESRCH");
       }
     };
     subprocess.all?.on("data", (chunk: Buffer | string) => {
@@ -224,13 +275,6 @@ export async function runSandboxedCommand(input: SandboxCommandInput) {
             });
           }
         }
-        if (
-          message.type === "sandbox-process" &&
-          "pid" in message &&
-          typeof message.pid === "number"
-        ) {
-          sandboxProcessPid = message.pid;
-        }
         if (message.type === "violations" && "lines" in message && Array.isArray(message.lines)) {
           violations = message.lines.filter((line): line is string => typeof line === "string");
         }
@@ -256,9 +300,7 @@ export async function runSandboxedCommand(input: SandboxCommandInput) {
 /** 长驻进程与一次性命令使用同一 SRT worker 边界，stdio 只作为协议管道转发。 */
 export async function spawnSandboxedProcess(input: SandboxProcessInput): Promise<SandboxedProcess> {
   input.signal?.throwIfAborted();
-  if (process.platform === "win32") {
-    throw new Error("SANDBOX_PLATFORM_UNAVAILABLE: 当前平台尚未验证长驻沙箱进程回收");
-  }
+  const isWindows = process.platform === "win32";
   const { config, environment, temporaryRoot, workspaceRoot } = await prepareSandbox(input);
   const subprocess = spawn(
     process.execPath,
@@ -268,6 +310,7 @@ export async function spawnSandboxedProcess(input: SandboxProcessInput): Promise
       detached: true,
       env: environment,
       stdio: ["pipe", "pipe", "pipe", "ipc"],
+      windowsHide: true,
     },
   );
   if (subprocess.stdin === null || subprocess.stdout === null || subprocess.stderr === null) {
@@ -281,7 +324,25 @@ export async function spawnSandboxedProcess(input: SandboxProcessInput): Promise
   let cleanup: Promise<void> | undefined;
   const exited = new Promise<void>((resolve) => subprocess.once("exit", () => resolve()));
   const removeTemporaryRoot = () =>
-    (cleanup ??= rm(temporaryRoot, { recursive: true, force: true }));
+    (cleanup ??= rm(temporaryRoot, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 100,
+    }));
+  /** 通过 IPC 发送启动参数、联网审批结果和停止请求。 */
+  const send = (message: object) =>
+    new Promise<void>((resolve, reject) => {
+      subprocess.send(message, (error) => (error ? reject(error) : resolve()));
+    });
+  /** Windows worker 需要继续存活以便关闭 broker 并撤回 NTFS 授权。 */
+  const stopWindowsWorker = () => {
+    if (!subprocess.connected || subprocess.exitCode !== null || subprocess.signalCode !== null)
+      return;
+    void send({ type: "stop" }).catch(() => {
+      if (subprocess.connected) subprocess.disconnect();
+    });
+  };
   const signalGroup = (signal: NodeJS.Signals) => {
     if (subprocess.pid === undefined) return;
     try {
@@ -293,10 +354,24 @@ export async function spawnSandboxedProcess(input: SandboxProcessInput): Promise
   const close = () =>
     (closing ??= (async () => {
       try {
-        if (subprocess.exitCode === null && subprocess.signalCode === null) {
+        if (
+          subprocess.pid !== undefined &&
+          subprocess.exitCode === null &&
+          subprocess.signalCode === null
+        ) {
           sandboxWorker.stdin.end();
-          await Promise.race([exited, delay(250)]);
-          if (subprocess.exitCode === null && subprocess.signalCode === null) {
+          if (isWindows) {
+            stopWindowsWorker();
+            await Promise.race([
+              exited,
+              delay(15_000, undefined, { ref: false }).then(() => {
+                throw new Error("SANDBOX_CLEANUP_FAILED: Windows 沙箱进程未在期限内退出");
+              }),
+            ]);
+          } else {
+            await Promise.race([exited, delay(250)]);
+          }
+          if (!isWindows && subprocess.exitCode === null && subprocess.signalCode === null) {
             signalGroup("SIGTERM");
             await Promise.race([exited, delay(500)]);
             if (subprocess.exitCode === null && subprocess.signalCode === null) {
@@ -314,17 +389,16 @@ export async function spawnSandboxedProcess(input: SandboxProcessInput): Promise
         sandboxWorker.stdin.destroy();
         sandboxWorker.stdout.destroy();
         sandboxWorker.stderr.destroy();
-        await removeTemporaryRoot();
+        if (
+          !isWindows ||
+          subprocess.pid === undefined ||
+          subprocess.exitCode !== null ||
+          subprocess.signalCode !== null
+        ) {
+          await removeTemporaryRoot();
+        }
       }
     })());
-  subprocess.once("exit", () => {
-    void removeTemporaryRoot();
-  });
-
-  const send = (message: object) =>
-    new Promise<void>((resolve, reject) => {
-      subprocess.send(message, (error) => (error ? reject(error) : resolve()));
-    });
   let resolveReady: (() => void) | undefined;
   let rejectReady: ((error: Error) => void) | undefined;
   let startupError = "";
@@ -336,6 +410,8 @@ export async function spawnSandboxedProcess(input: SandboxProcessInput): Promise
     resolveReady = resolve;
     rejectReady = reject;
   });
+  // worker 可能在发送启动参数完成前退出，仍由下面的 await 报告该错误。
+  void ready.catch(() => undefined);
   subprocess.on("message", (message: unknown) => {
     if (typeof message !== "object" || message === null || !("type" in message)) return;
     if (message.type === "sandbox-process") {
@@ -370,7 +446,10 @@ export async function spawnSandboxedProcess(input: SandboxProcessInput): Promise
           requestId,
           type: "network-approval-result",
         });
-      })().catch(() => signalGroup("SIGKILL"));
+      })().catch(() => {
+        if (isWindows) stopWindowsWorker();
+        else signalGroup("SIGKILL");
+      });
     }
   });
   subprocess.once("error", () =>
@@ -384,7 +463,8 @@ export async function spawnSandboxedProcess(input: SandboxProcessInput): Promise
     ),
   );
   const abort = () => {
-    signalGroup("SIGKILL");
+    if (isWindows) stopWindowsWorker();
+    else signalGroup("SIGKILL");
     rejectReady?.(new Error("SANDBOX_PROCESS_ABORTED: 沙箱进程启动已取消"));
   };
   input.signal?.addEventListener("abort", abort, { once: true });
@@ -399,6 +479,8 @@ export async function spawnSandboxedProcess(input: SandboxProcessInput): Promise
       mode: "process",
       type: "start",
     });
+    // 路径校验期间也可能收到中止，启动消息发出后立即补发停止。
+    if (input.signal?.aborted) abort();
     await ready;
     input.signal?.throwIfAborted();
     return {

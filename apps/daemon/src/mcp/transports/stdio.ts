@@ -1,5 +1,7 @@
-import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, execFile, spawn } from "node:child_process";
+import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { promisify } from "node:util";
 import {
   type JSONRPCMessage,
   serializeMessage,
@@ -19,6 +21,7 @@ const MAX_STDERR_BYTES = 1024 * 1024;
 const MAX_BYTES_PER_SECOND = 32 * 1024 * 1024;
 const MAX_MESSAGES_PER_SECOND = 1_024;
 const WRITE_TIMEOUT_MS = 15_000;
+const execFileAsync = promisify(execFile);
 
 export interface McpProcessLaunch {
   commandId: string;
@@ -197,12 +200,14 @@ export class McpStdioTransport implements Transport {
   }
 }
 
+/** 以 daemon 用户身份启动受信任的 stdio 服务并管理进程树回收。 */
 async function spawnTrustedHostProcess(launch: McpProcessLaunch): Promise<SandboxedProcess> {
   const child = spawn(launch.command, launch.args, {
     cwd: launch.cwd,
     detached: true,
     env: { ...launch.environment, ...launch.credentials },
     stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
   });
   await new Promise<void>((resolve, reject) => {
     child.once("spawn", resolve);
@@ -224,6 +229,21 @@ async function spawnTrustedHostProcess(launch: McpProcessLaunch): Promise<Sandbo
     close: () =>
       (closing ??= (async () => {
         if (process.exitCode !== null || process.signalCode !== null) return;
+        // Windows 没有负 PID 进程组信号，使用系统命令结束服务及其后代。
+        if (globalThis.process.platform === "win32" && process.pid !== undefined) {
+          const systemRoot = globalThis.process.env.SystemRoot ?? "C:\\Windows";
+          try {
+            await execFileAsync(
+              join(systemRoot, "System32", "taskkill.exe"),
+              ["/PID", String(process.pid), "/T", "/F"],
+              { timeout: 5_000, windowsHide: true },
+            );
+          } catch (error: unknown) {
+            if (process.exitCode === null && process.signalCode === null) throw error;
+          }
+          await exited;
+          return;
+        }
         signalGroup("SIGTERM");
         await Promise.race([exited, delay(500)]);
         if (process.exitCode === null && process.signalCode === null) {

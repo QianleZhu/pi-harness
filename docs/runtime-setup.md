@@ -35,9 +35,15 @@ Memory 混合检索、MCP 工具混合检索和 Session 搜索分别服务具体
 
 Web 登录需要有效的 GitHub OAuth App Client ID 和 Client Secret，回调地址为 `http://127.0.0.1:4310/api/auth/github/callback`；模型对话还需要在应用中配置可用的模型 Provider 凭据。根目录已有有效的 `.env.enc` 和 `.env.key` 时，可在 `.env` 不存在的前提下用 `pnpm env:decrypt` 恢复；否则按上方配置项自行填写，不能直接复制含空 OAuth 值的示例。不要分享密钥或明文配置。
 
-Windows 下非完全访问模式的受沙箱监管命令与普通 stdio MCP 目前无法启动，详见 [Sandbox 说明](../packages/sandbox/README.md)；完全访问模式会直接使用宿主机权限，只有理解风险时才应选择。Computer Use 当前仅支持 macOS。网络搜索需要另行启动本机 SearXNG；它不是启动 Web 和 daemon 的前提。
+原生 Windows 的沙箱需要一次管理员安装，命令和使用限制见 [Sandbox 说明](../packages/sandbox/README.md#原生-windows)。Computer Use 当前仅支持 macOS。网络搜索需要另行启动本机 SearXNG；它不是启动 Web 和 daemon 的前提。
 
-以下命令可按需执行。
+### Windows 上使用 WSL 2 运行沙箱
+
+在 WSL 2 Ubuntu 内安装 Linux 版 Node.js 24、pnpm 10.33.2，以及 `bubblewrap`、`socat` 和 `ripgrep`。把项目和需要使用工具的工作区放在 Linux 文件系统中，例如 `~/pi-harness`。从 WSL 内安装项目依赖、配置该副本的 `.env`，再用 `pnpm dev` 启动 Web 和 daemon。Windows 浏览器仍可访问 `http://127.0.0.1:5173`。
+
+非完全访问模式的命令和普通 stdio MCP 由 WSL 中的 SRT worker 启动。沙箱拒绝读写 Windows 盘符的挂载路径，例如 `/mnt/c` 和 `/mnt/d`，也会拒绝从这些挂载路径启动隔离工作区。开发数据使用 WSL 项目自己的 `.pi-harness` 目录。
+
+### 常用命令
 
 | 命令 | 行为与前提 |
 |---|---|

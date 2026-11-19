@@ -218,7 +218,7 @@ export const sessionQueryKeys = {
 - 普通工作区文件工具的路径在审批前和实际执行前都要进行规范化与 workspace 边界检查，使用真实路径检查符号链接，拒绝 workspace 外部路径与 daemon 凭据目录。
 - Skill 工具按 Registry 解析的系统、项目或全局 Skill 根目录检查资源边界，不接受任意外部路径；专用 `skill_creator` 的全局写入只允许 daemon Skill 根目录。不得借 Skill 读取或写入绕过普通文件工具的路径保护。
 - 默认 `request_approval` 策略下，工作区文件写入、Shell 命令和未分类 MCP 工具需要用户审批；`auto_approve` 自动批准工作区文件写入，Shell 和未分类 MCP 工具交独立审批模型复核，不确定、失败或超时仍请求人工批准；`full_access` 自动批准这些工具。
-- 内置文件工具始终执行 workspace 真实路径与受保护目录检查。普通审批模式下 Shell 和普通 stdio MCP 使用 SRT；`full_access` 下直接以宿主机权限运行，Shell 仍固定 cwd、环境变量白名单、超时、输出限制和中止信号。MCP 连接信任、账号鉴权与 macOS 系统权限独立于工具审批；Computer Use 原生 helper 的宿主访问只允许固定内置身份，不能扩展为普通 MCP 例外。只读、目录列举和文本搜索可以自动执行。
+- 内置文件工具始终执行 workspace 真实路径与受保护目录检查。普通审批模式下 Shell 在所有受支持的平台使用 SRT，普通 stdio MCP 在 macOS 和 Linux 使用 SRT，在原生 Windows 以 daemon 的宿主账户运行。`full_access` 下 Shell 与 stdio MCP 直接以宿主机权限运行，Shell 仍固定 cwd、环境变量白名单、超时、输出限制和中止信号。MCP 连接信任、账号鉴权与 macOS 系统权限独立于工具审批。Computer Use 原生 helper 的宿主访问仅允许固定内置身份。只读、目录列举和文本搜索可以自动执行。
 - 审批请求必须包含工具名、规范化后的目标、参数摘要、风险说明、session ID 和 run ID。
 - 审批等待必须支持拒绝、超时、Agent abort 和 daemon 关闭。
 - `run_command` 必须设置 cwd、总生存超时、输出上限并传递 `AbortSignal`；短暂等待后仍运行时返回受监管的 `processId`，通过 `wait_command` / `stop_command` 或命令 API 查询和停止。Run 中止和 daemon 关闭必须回收命令进程，不能创建无法追踪的后台进程。

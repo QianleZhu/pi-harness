@@ -10,6 +10,7 @@ import {
 import {
   createDreamingTools,
   DREAMING_AGENT_PROMPT,
+  DREAMING_BOOTSTRAP_PROMPT,
   type DreamingMemoryChange,
   DreamingRunStatus,
   type GlobalDreamingCandidate,
@@ -24,6 +25,7 @@ import type { SessionEventStore } from "../storage/session-event-store.js";
 import { selectRunEvents, textData } from "../utils/dreaming-events.js";
 import {
   DEFAULT_MEMORY_CONTEXT,
+  EMPTY_WIKI_INDEX,
   ID_PATTERN,
   readWiki,
   stripRecordedMemorySection,
@@ -108,6 +110,10 @@ export class DreamingService {
         currentWiki ? join(workspaceDir, currentWiki.directoryId) : null,
       );
       const originalFiles = new Map(files);
+      // 记忆结构尚未建立时，以空脚手架启动，由 Agent 根据本批原始日志搭建。
+      const bootstrap = !files.has("context.md") || !files.has("index.md");
+      if (!files.has("context.md")) files.set("context.md", DEFAULT_MEMORY_CONTEXT);
+      if (!files.has("index.md")) files.set("index.md", EMPTY_WIKI_INDEX);
       const changes: DreamingMemoryChange[] = [];
       const globalCandidates: GlobalDreamingCandidate[] = [];
       const readRuns = new Set<string>();
@@ -133,7 +139,9 @@ export class DreamingService {
         messages: [],
         model: resolved.model,
         sessionId: agentSessionId,
-        systemPrompt: DREAMING_AGENT_PROMPT,
+        systemPrompt: bootstrap
+          ? `${DREAMING_AGENT_PROMPT}\n${DREAMING_BOOTSTRAP_PROMPT}`
+          : DREAMING_AGENT_PROMPT,
         streamFn: resolved.streamFn,
         tools,
       });

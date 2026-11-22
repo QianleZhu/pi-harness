@@ -182,17 +182,6 @@ export interface MemoryRuntime {
     snapshot?: RunMemorySnapshot | null,
   ): Promise<unknown>;
   recordMemory(input: RecordMemoryInput, signal?: AbortSignal): Promise<RecordedMemory>;
-  createFromSession(
-    input: {
-      content: string;
-      profileFacet?: UserProfileFacetValue | null;
-      scope: MemoryScopeValue;
-      sessionId: string;
-      workspaceId: string;
-    },
-    signal?: AbortSignal,
-  ): Promise<MemoryRecord>;
-  deleteVisible(memoryId: string, expectedRevision: number, workspaceId: string): Promise<void>;
   getSettings(): MemorySettings;
   search(
     query: string,
@@ -201,14 +190,6 @@ export interface MemoryRuntime {
     signal?: AbortSignal,
     snapshot?: RunMemorySnapshot | null,
   ): Promise<readonly MemoryRecord[]>;
-  updateVisibleContent(
-    memoryId: string,
-    content: string,
-    expectedRevision: number,
-    workspaceId: string,
-    profileFacet?: UserProfileFacetValue | null,
-    signal?: AbortSignal,
-  ): Promise<MemoryRecord>;
 }
 
 const DEFAULT_SETTINGS = { generateMemories: true, useMemories: true } as const;
@@ -377,19 +358,6 @@ export class MemoryService implements MemoryRuntime {
     );
   }
 
-  public createFromSession(
-    input: {
-      content: string;
-      profileFacet?: UserProfileFacetValue | null;
-      scope: MemoryScopeValue;
-      sessionId: string;
-      workspaceId: string;
-    },
-    signal?: AbortSignal,
-  ): Promise<MemoryRecord> {
-    return this.withMutation(() => this.createSessionMemory(input, signal));
-  }
-
   public update(
     memoryId: string,
     input: UpdateMemoryInput,
@@ -454,28 +422,6 @@ export class MemoryService implements MemoryRuntime {
     return this.update(memoryId, { content, expectedRevision }, signal);
   }
 
-  public updateVisibleContent(
-    memoryId: string,
-    content: string,
-    expectedRevision: number,
-    workspaceId: string,
-    profileFacet?: UserProfileFacetValue | null,
-    signal?: AbortSignal,
-  ): Promise<MemoryRecord> {
-    return this.withMutation(() => {
-      this.assertVisible(memoryId, workspaceId);
-      return this.updateUnlocked(
-        memoryId,
-        {
-          content,
-          expectedRevision,
-          ...(profileFacet === undefined ? {} : { profileFacet }),
-        },
-        signal,
-      );
-    });
-  }
-
   public delete(memoryId: string, expectedRevision: number): Promise<void> {
     return this.withMutation(() => this.deleteUnlocked(memoryId, expectedRevision));
   }
@@ -489,17 +435,6 @@ export class MemoryService implements MemoryRuntime {
     ) {
       throw new MemoryError(MemoryErrorCode.CONFLICT, "记忆已发生变化，请刷新后重试");
     }
-  }
-
-  public deleteVisible(
-    memoryId: string,
-    expectedRevision: number,
-    workspaceId: string,
-  ): Promise<void> {
-    return this.withMutation(() => {
-      this.assertVisible(memoryId, workspaceId);
-      this.deleteUnlocked(memoryId, expectedRevision);
-    });
   }
 
   public updateSettings(input: UpdateMemorySettingsInput): Promise<MemorySettings> {
@@ -656,29 +591,6 @@ export class MemoryService implements MemoryRuntime {
     return memory;
   }
 
-  private createSessionMemory(
-    input: {
-      content: string;
-      profileFacet?: UserProfileFacetValue | null;
-      scope: MemoryScopeValue;
-      sessionId: string;
-      workspaceId: string;
-    },
-    signal?: AbortSignal,
-  ): Promise<MemoryRecord> {
-    return this.create(
-      {
-        content: input.content,
-        ...(input.profileFacet === undefined ? {} : { profileFacet: input.profileFacet }),
-        scope: input.scope,
-        sourceSessionId: input.sessionId,
-        sourceType: SourceType.SESSION,
-        workspaceId: input.scope === MemoryScope.USER ? null : input.workspaceId,
-      },
-      signal,
-    );
-  }
-
   private async tryEmbedMemory(
     content: string,
     signal?: AbortSignal,
@@ -754,13 +666,6 @@ export class MemoryService implements MemoryRuntime {
   private assertWorkspace(workspaceId: string | null): void {
     if (workspaceId !== null && !this.repository.hasWorkspace(workspaceId)) {
       throw new MemoryError(MemoryErrorCode.WORKSPACE_NOT_FOUND, "Workspace 不存在");
-    }
-  }
-
-  private assertVisible(memoryId: string, workspaceId: string): void {
-    const memory = this.repository.find(memoryId);
-    if (!memory || (memory.scope === MemoryScope.WORKSPACE && memory.workspaceId !== workspaceId)) {
-      throw new MemoryError(MemoryErrorCode.NOT_FOUND, "记忆不存在");
     }
   }
 }

@@ -14,6 +14,8 @@
 - [x] `record_memory` 写入第三层记忆并追加第一层临时区块；Dreaming 发布时移除临时区块。
 - [x] 支持确认、修正、冲突、过时和临时记忆处理；没有变更理由时允许不更新。
 - [x] 全局记忆由单一全局 Agent 串行处理；没有值得复用的经验时允许不提交。
+- [x] 记忆结构尚未建立时，Dreaming 以默认脚手架启动，并根据本批原始日志搭建初始 Wiki 与记忆。
+- [x] 移除 `save_memory`、`update_memory`、`delete_memory` Agent 工具，只保留 `search_memories` 与主动学习的 `record_memory`；手动记忆管理继续通过 daemon API 完成。
 - [x] 验证多 Run 多 Session 单 Agent、工具分页、上下文压缩和全局记忆发布。
 
 ## 第一阶段：契约与数据基础
@@ -83,7 +85,7 @@ Wiki 位于 daemon 数据目录的 `dreaming/<workspaceId>/<directoryId>/`，`dr
 - [x] 模型未配置、Provider 不可用或凭据缺失时不启动分析，符合条件的 Run 保持待处理；调用开始后失败或超时则标记失败，不重试。
 - [x] 主 Run 加载当前工作区的 `context.md`，保留按需记忆检索；关闭 `useMemories` 时不注入或读取长期记忆。
 - [x] 提供按需读取 Wiki、记忆版本与会话来源的只读工具，将派生内容视为不可信上下文。
-- [x] 移除自动 `learn_memory` 工具及提示词；保留用户明确要求的保存、修改和删除操作及现有审批规则。
+- [x] 移除自动 `learn_memory` 工具及提示词；保留用户明确要求的保存、修改和删除操作及现有审批规则（后续已改为只保留 `record_memory` 与 `search_memories`，见“统一整理 Agent”）。
 - [x] 验证模型设置、上下文注入、只读访问和现有显式记忆操作。
 - [x] 用户校验第四阶段。
 

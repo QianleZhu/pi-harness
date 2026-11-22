@@ -2,7 +2,6 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { ToolPermission, type ToolPolicy } from "@pi-harness/policy";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
-import { MemoryScope, UserProfileFacetSchema } from "./contract.js";
 import { MemoryEvidenceStatus } from "./dreaming.js";
 import type { MemoryRuntime, RunMemorySnapshot } from "./memory-service.js";
 
@@ -15,21 +14,6 @@ export const RECORD_MEMORY_TOOL_NAME = "record_memory";
 const SearchMemoriesParameters = Type.Object({
   limit: Type.Optional(Type.Integer({ maximum: 50, minimum: 1 })),
   query: Type.String({ maxLength: 500, minLength: 1 }),
-});
-const CreateMemoryParameters = Type.Object({
-  content: Type.String({ maxLength: 500, minLength: 1 }),
-  profileFacet: Type.Optional(Type.Union([UserProfileFacetSchema, Type.Null()])),
-  scope: Type.Union([Type.Literal(MemoryScope.USER), Type.Literal(MemoryScope.WORKSPACE)]),
-});
-const UpdateMemoryParameters = Type.Object({
-  content: Type.String({ maxLength: 500, minLength: 1 }),
-  expectedRevision: Type.Integer({ minimum: 1 }),
-  memoryId: Type.String({ format: "uuid" }),
-  profileFacet: Type.Optional(Type.Union([UserProfileFacetSchema, Type.Null()])),
-});
-const DeleteMemoryParameters = Type.Object({
-  expectedRevision: Type.Integer({ minimum: 1 }),
-  memoryId: Type.String({ format: "uuid" }),
 });
 const RecordableEvidenceStatus = Type.Union([
   Type.Literal(MemoryEvidenceStatus.USER_STATED),
@@ -104,106 +88,6 @@ function createRecordMemoryTool(
   };
 }
 
-function createSaveTool(
-  memory: MemoryRuntime,
-  sessionId: string,
-  workspaceId: string,
-): AgentTool<typeof CreateMemoryParameters> {
-  return {
-    description:
-      "保存一条长期记忆。仅当用户明确要求记住时调用；用户画像设置 profileFacet，跨项目通用经验设置 profileFacet 为 null；不得保存秘密或临时任务细节。",
-    executionMode: "sequential",
-    label: "Save memory",
-    name: "save_memory",
-    parameters: CreateMemoryParameters,
-    async execute(_toolCallId, input, signal) {
-      return textResult(
-        await memory.createFromSession(
-          {
-            ...input,
-            sessionId,
-            workspaceId,
-          },
-          signal,
-        ),
-      );
-    },
-  };
-}
-
-function createUpdateTool(
-  memory: MemoryRuntime,
-  workspaceId: string,
-): AgentTool<typeof UpdateMemoryParameters> {
-  return {
-    description:
-      "改写现有长期记忆，也可调整画像分类或将通用经验的 profileFacet 设为 null。先取得 ID 和 revision，仅在用户明确要求修改时调用。",
-    executionMode: "sequential",
-    label: "Update memory",
-    name: "update_memory",
-    parameters: UpdateMemoryParameters,
-    async execute(_toolCallId, input, signal) {
-      return textResult(
-        await memory.updateVisibleContent(
-          input.memoryId,
-          input.content,
-          input.expectedRevision,
-          workspaceId,
-          input.profileFacet,
-          signal,
-        ),
-      );
-    },
-  };
-}
-
-function createDeleteTool(
-  memory: MemoryRuntime,
-  workspaceId: string,
-): AgentTool<typeof DeleteMemoryParameters> {
-  return {
-    description:
-      "删除现有长期记忆。先通过上下文或 search_memories 取得 ID 和 revision，并且仅在用户明确要求删除时调用。",
-    executionMode: "sequential",
-    label: "Delete memory",
-    name: "delete_memory",
-    parameters: DeleteMemoryParameters,
-    async execute(_toolCallId, input) {
-      await memory.deleteVisible(input.memoryId, input.expectedRevision, workspaceId);
-      return textResult({ deleted: true, memoryId: input.memoryId });
-    },
-  };
-}
-
-function memoryMutationPolicy(
-  parameters:
-    | typeof CreateMemoryParameters
-    | typeof UpdateMemoryParameters
-    | typeof DeleteMemoryParameters,
-  summary: string,
-  risk: string,
-  isGranted = false,
-): ToolPolicy {
-  return {
-    allowInFullAccess: true,
-    permission: ToolPermission.USER_APPROVAL,
-    resolveGrant(args) {
-      if (!Value.Check(parameters, args)) throw new Error("MEMORY_INVALID: 无效记忆参数");
-      const input = args as Static<typeof CreateMemoryParameters> &
-        Partial<Static<typeof UpdateMemoryParameters>>;
-      return {
-        allowSession: false,
-        allowSimilar: false,
-        fingerprint: JSON.stringify(args),
-        ...(isGranted ? { isGranted: true } : {}),
-        risk,
-        summary,
-        target: input.memoryId ?? input.content,
-      };
-    },
-  };
-}
-
 function learningPolicy(
   memory: MemoryRuntime,
   parameters: typeof RecordMemoryParameters,
@@ -239,9 +123,6 @@ export function createMemoryToolRegistrations(
 ): readonly MemoryToolRegistration[] {
   const search = createSearchTool(memory, workspaceId, getSnapshot);
   const record = createRecordMemoryTool(memory, sessionId, workspaceId, getRunId);
-  const save = createSaveTool(memory, sessionId, workspaceId);
-  const update = createUpdateTool(memory, workspaceId);
-  const remove = createDeleteTool(memory, workspaceId);
   return [
     {
       policy: { permission: ToolPermission.READ_ONLY },
@@ -260,38 +141,6 @@ export function createMemoryToolRegistrations(
       source: MEMORY_TOOL_SOURCE,
       timeoutMs: TOOL_TIMEOUT_MS,
       tool: record,
-    },
-    {
-      policy: memoryMutationPolicy(
-        CreateMemoryParameters,
-        "保存长期记忆",
-        "该内容会在适用范围内注入后续对话，直到被修改或删除。",
-        true,
-      ),
-      source: MEMORY_TOOL_SOURCE,
-      timeoutMs: TOOL_TIMEOUT_MS,
-      tool: save,
-    },
-    {
-      policy: memoryMutationPolicy(
-        UpdateMemoryParameters,
-        "改写长期记忆",
-        "该操作会替换现有记忆内容，并影响后续对话。",
-        true,
-      ),
-      source: MEMORY_TOOL_SOURCE,
-      timeoutMs: TOOL_TIMEOUT_MS,
-      tool: update,
-    },
-    {
-      policy: memoryMutationPolicy(
-        DeleteMemoryParameters,
-        "删除长期记忆",
-        "该操作会永久移除这条记忆。",
-      ),
-      source: MEMORY_TOOL_SOURCE,
-      timeoutMs: TOOL_TIMEOUT_MS,
-      tool: remove,
     },
   ];
 }

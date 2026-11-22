@@ -23,6 +23,7 @@ export {
   SEARCH_MEMORIES_TOOL_NAME,
 } from "./memory-tools.js";
 export { DREAMING_AGENT_PROMPT } from "./prompts/dreaming-agent-prompt.js";
+export { DREAMING_BOOTSTRAP_PROMPT } from "./prompts/dreaming-bootstrap-prompt.js";
 export { GLOBAL_DREAMING_PROMPT } from "./prompts/global-dreaming-prompt.js";
 export { createDreamingTools } from "./tools/dreaming-tools.js";
 export { createGlobalDreamingTools } from "./tools/global-dreaming-tools.js";

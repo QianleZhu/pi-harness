@@ -29,5 +29,5 @@ A "## 当前运行记录的长期记忆" section inside the injected context is 
 ${wikiContext ? `<dreaming_context>${escapeXml(wikiContext)}</dreaming_context>` : ""}
 ${globalContext ? `<global_memory_context>${escapeXml(globalContext)}</global_memory_context>` : ""}
 </memory_context>
-${usage} ${recording} Use save_memory or update_memory without asking for a second confirmation only when the user explicitly asks to remember or change something. Use delete_memory only when the user explicitly asks; deletion still requires confirmation.`;
+${usage} ${recording}`;
 }

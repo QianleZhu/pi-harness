@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { cp, glob, mkdir, mkdtemp, realpath, rename, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   type RunInputContextReference,
   UserContextReferenceKind,
@@ -78,6 +79,7 @@ export class WorkspaceServiceError extends Error {
   }
 }
 
+// 按宿主系统选择目录选择器的启动命令。
 function readPickerCommand(): { args: readonly string[]; command: string } {
   if (process.platform === "darwin") {
     return {
@@ -87,15 +89,14 @@ function readPickerCommand(): { args: readonly string[]; command: string } {
   }
 
   if (process.platform === "win32") {
+    const extension = import.meta.url.endsWith(".ts") ? "ts" : "js";
+    const entry = fileURLToPath(
+      new URL(`../workers/windows-folder-picker.${extension}`, import.meta.url),
+    );
+    // COM 的模态调用会阻塞线程，独立进程可在取消或超时时直接回收。
     return {
-      args: [
-        "-NoProfile",
-        "-NonInteractive",
-        "-STA",
-        "-Command",
-        "Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dialog.SelectedPath) }",
-      ],
-      command: "powershell.exe",
+      args: extension === "ts" ? ["--import", "tsx", entry] : [entry],
+      command: process.execPath,
     };
   }
 
@@ -122,16 +123,24 @@ function isCommandUnavailable(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
+// 启动系统目录选择器，并在请求取消或超时时结束子进程。
 function runPicker(signal: AbortSignal): Promise<string> {
   const { args, command } = readPickerCommand();
   return new Promise((resolve, reject) => {
     execFile(
       command,
       [...args],
-      { encoding: "utf8", maxBuffer: 4_096, signal, timeout: PICKER_TIMEOUT_MS },
+      {
+        encoding: "utf8",
+        maxBuffer: 128 * 1024,
+        signal,
+        timeout: PICKER_TIMEOUT_MS,
+        // Windows 子进程只显示目录选择窗口。
+        windowsHide: true,
+      },
       (error, stdout) => {
         if (error) reject(error);
-        else resolve(stdout.trim());
+        else resolve(process.platform === "win32" ? stdout : stdout.trim());
       },
     );
   });

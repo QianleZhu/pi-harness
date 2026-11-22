@@ -29,6 +29,7 @@
     "@pi-harness/tools": "workspace:*",
     "es-toolkit": "catalog:",
     "fastify": "catalog:",
+    "koffi": "catalog:",
     "pino": "catalog:",
     "tsx": "catalog:",
     "typebox": "catalog:",

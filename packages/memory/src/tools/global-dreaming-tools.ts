@@ -25,6 +25,7 @@ const InspectSchema = Type.Object({
   query: Type.Optional(Type.String({ maxLength: 500 })),
   offset: Type.Optional(Type.Integer({ minimum: 0 })),
 });
+const MAX_GLOBAL_TOOL_CALLS = 120;
 
 // 限制全局 Agent 只能引用本批候选和固定版本中的记忆。
 export function createGlobalDreamingTools(options: {
@@ -47,7 +48,7 @@ export function createGlobalDreamingTools(options: {
       parameters: InspectSchema,
       async execute(_id, value) {
         options.signal.throwIfAborted();
-        if (++calls > 40) {
+        if (++calls > MAX_GLOBAL_TOOL_CALLS) {
           options.onLimit();
           throw new Error("Global Dreaming tool limit exceeded");
         }
@@ -81,7 +82,7 @@ export function createGlobalDreamingTools(options: {
       parameters: DraftSchema,
       async execute(_id, value) {
         options.signal.throwIfAborted();
-        if (++calls > 40) {
+        if (++calls > MAX_GLOBAL_TOOL_CALLS) {
           options.onLimit();
           throw new Error("Global Dreaming tool limit exceeded");
         }

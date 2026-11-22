@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { createAgent } from "@pi-harness/agent-runtime";
+import { type ContextCompactedData, createAgent, projectContext } from "@pi-harness/agent-runtime";
 import {
   createGlobalDreamingTools,
   GLOBAL_DREAMING_PROMPT,
@@ -45,14 +45,15 @@ export class GlobalDreamingService {
     }
     const current = this.dreaming.getGlobalVersion();
     const resolved = await this.providers.resolveRunModel(input.providerId, input.modelId);
-    const signal = AbortSignal.any([input.signal, AbortSignal.timeout(300_000)]);
+    const signal = AbortSignal.any([input.signal, AbortSignal.timeout(600_000)]);
     signal.throwIfAborted();
     const changes: GlobalDreamingMemoryChange[] = [];
     let abortAgent = () => {};
+    const agentSessionId = randomUUID();
     const agent = createAgent({
       messages: [],
       model: resolved.model,
-      sessionId: randomUUID(),
+      sessionId: agentSessionId,
       streamFn: resolved.streamFn,
       systemPrompt: GLOBAL_DREAMING_PROMPT,
       tools: createGlobalDreamingTools({
@@ -65,6 +66,26 @@ export class GlobalDreamingService {
         readSources: (id, revision) => this.dreaming.listSources(id, revision),
       }),
     });
+    // 复用统一上下文压缩，避免大量候选和记忆把全局 Agent 推出模型窗口。
+    let checkpoint: ContextCompactedData | null = null;
+    agent.transformContext = async (messages, contextSignal) => {
+      const projected = await projectContext({
+        activeRunStartMessageIndex: 0,
+        checkpoint,
+        messages,
+        model: resolved.model,
+        plan: null,
+        todos: null,
+        sessionId: agentSessionId,
+        ...(contextSignal === undefined ? {} : { signal: contextSignal }),
+        streamFn: resolved.streamFn,
+        systemPrompt: agent.state.systemPrompt,
+        tools: agent.state.tools,
+      });
+      if (projected.error) throw new Error(`GLOBAL_DREAMING_CONTEXT_EXCEEDED: ${projected.error}`);
+      if (projected.compacted) checkpoint = projected.compacted;
+      return projected.messages;
+    };
     const abort = () => agent.abort();
     abortAgent = abort;
     signal.addEventListener("abort", abort, { once: true });

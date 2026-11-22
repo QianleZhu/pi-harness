@@ -1,5 +1,7 @@
 # PI Harness 的 Dreaming 实现
 
+> 2026-11-22 说明：本文记录改造前的“分析 + 整理”两段式设计。当前实现已合并为一个带工具的 Dreaming Agent：初始只给 Run 元数据，事件、记忆和 Wiki 按需分页读取，并复用 `projectContext` 上下文压缩。最新设计见 [Dreaming 技术方案](../docs/dreaming-技术方案.md)。
+
 项目的初始方案里有个例子。一次联调中，设置 `FOO=1` 后，旧版配置的集成测试跑通了。过了几轮，又有一次测试没显式设置这个变量也通过了。下一次遇到测试失败，Agent 应该沿用哪次经验？
 
 这得先看两次跑的是什么测试、配置版本有没有变化，以及工具结果能证明什么。记一句「测试需要 `FOO=1`」当然省事，到了另一个版本却可能让排查多绕一圈。把两轮对话原样塞给模型，排查成本又回到了下一轮。PI Harness 做 Dreaming，是想把值得复用的经验提前整理好，同时给后来使用这条经验的人留一条核对的路。这里的测试场景来自设计文档，用来说明取舍。[Dreaming 初始方案](../docs/dreaming-初始方案.md)
@@ -64,5 +66,5 @@ Web 提供「使用记忆」「从对话中学习」和「Dreaming 模型」三�
 ## 源码入口
 
 - 设置、Run 登记和后台调度见 [create-server.ts](../apps/daemon/src/server/create-server.ts)、[dreaming-worker.ts](../apps/daemon/src/workers/dreaming-worker.ts) 和 [dreaming-scheduler.ts](../apps/daemon/src/services/dreaming-scheduler.ts)。
-- 分析、工作区整理和发布见 [dreaming-analysis-service.ts](../apps/daemon/src/services/dreaming-analysis-service.ts)、[dreaming-service.ts](../apps/daemon/src/services/dreaming-service.ts) 和 [dreaming-repository.ts](../apps/daemon/src/storage/dreaming-repository.ts)。
+- 统一整理 Agent、工具和发布见 [dreaming-service.ts](../apps/daemon/src/services/dreaming-service.ts)、[dreaming-tools.ts](../packages/memory/src/tools/dreaming-tools.ts) 和 [dreaming-repository.ts](../apps/daemon/src/storage/dreaming-repository.ts)。
 - 全局整理和前台读取见 [global-dreaming-service.ts](../apps/daemon/src/services/global-dreaming-service.ts)、[dreaming-reader.ts](../apps/daemon/src/services/dreaming-reader.ts) 和 [agent-manager.ts](../packages/agent-runtime/src/agent-manager.ts)。

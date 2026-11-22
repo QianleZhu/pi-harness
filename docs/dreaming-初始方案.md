@@ -1,5 +1,7 @@
 # Dreaming 初始方案
 
+> 注意：本文是初始方案，当前实现以 [Dreaming 技术方案](./dreaming-技术方案.md) 为准。主 Agent 已恢复工作中主动记录记忆的能力（`record_memory`），并由统一的 Dreaming Agent 根据原始日志校验和整理。
+
 解决的问题:agent提取的长期记忆是否真的对未来做事情有帮助?
 
 ## 目标与边界

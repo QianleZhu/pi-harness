@@ -11,7 +11,7 @@ import type { SessionRepository } from "../storage/database.js";
 import type { SqliteDreamingRepository } from "../storage/dreaming-repository.js";
 import type { SqliteMemoryRepository } from "../storage/memory-repository.js";
 import type { SessionEventStore } from "../storage/session-event-store.js";
-import { textData } from "../utils/dreaming-analysis.js";
+import { textData } from "../utils/dreaming-events.js";
 import { ID_PATTERN } from "../utils/dreaming-wiki.js";
 
 // 从固定发布版本及其引用中读取工作区和全局记忆。

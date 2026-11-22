@@ -4,12 +4,15 @@ import { join, resolve } from "node:path";
 import {
   DREAMING_WIKI_NAME_PATTERN,
   type DreamingMemoryChange,
+  RECORDED_MEMORY_CONTEXT_HEADING,
   resolveDreamingRevision,
 } from "@pi-harness/memory";
 import type { SqliteDreamingRepository } from "../storage/dreaming-repository.js";
 import type { SqliteMemoryRepository } from "../storage/memory-repository.js";
 
 export const ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const EMPTY_WIKI_INDEX = "# 索引\n\n暂无主题。\n";
+export const DEFAULT_MEMORY_CONTEXT = "# 注入上下文\n\n导航：[索引](index.md)\n";
 const REFERENCE_PATTERN = /\[memory:([0-9a-f-]{36})@(\d+)\]/gi;
 // Wiki 内部文档链接使用与读取工具相同的单层文件名。
 const WIKI_LINK_PATTERN = /\[[^\]\n]+\]\(([^\s)]+)\)/g;
@@ -56,6 +59,27 @@ export async function readWiki(directory: string | null): Promise<Map<string, st
   return files;
 }
 
+// 移除第一层临时区块，保留其前后的正式上下文。
+export function stripRecordedMemorySection(context: string): string {
+  const newline = context.includes("\r\n") ? "\r\n" : "\n";
+  const lines = context.split(/\r?\n/);
+  const headingIndex = lines.findIndex((line) => line.trim() === RECORDED_MEMORY_CONTEXT_HEADING);
+  if (headingIndex < 0) return context;
+  let end = lines.length;
+  for (let index = headingIndex + 1; index < lines.length; index += 1) {
+    if (/^#{1,2}\s/.test(lines[index] ?? "")) {
+      end = index;
+      break;
+    }
+  }
+  const joined = [...lines.slice(0, headingIndex), ...lines.slice(end)].join(newline);
+  const collapsed =
+    newline === "\r\n"
+      ? joined.replaceAll(/(\r\n){3,}/g, "\r\n\r\n")
+      : joined.replaceAll(/\n{3,}/g, "\n\n");
+  return `${collapsed.trimEnd()}${newline}`;
+}
+
 // 校验完整 Wiki 的预算和摘要引用。
 export function validateWiki(
   files: Map<string, string>,
@@ -68,6 +92,8 @@ export function validateWiki(
   const index = files.get("index.md");
   if (context === undefined || index === undefined || context.length > 2000 || index.length > 4000)
     throw new Error("Invalid Wiki navigation or context");
+  if (context.includes(RECORDED_MEMORY_CONTEXT_HEADING))
+    throw new Error("Wiki context must not include provisional recorded memories");
   if (!context.includes("index.md")) throw new Error("Wiki context must point to navigation");
   let topicsLength = 0;
   const refs = new Map<string, { memoryId: string; revision: number; isCurrent: boolean }>();

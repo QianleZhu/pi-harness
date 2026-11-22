@@ -29,14 +29,6 @@ export interface MemoryRevisionSource {
   eventSeq: number;
 }
 
-// Run 分析结果与待发布记忆变化。
-export interface DreamingCandidate {
-  content: string;
-  applicability: string | null;
-  evidence: string;
-  sources: { eventId: string; eventSeq: number }[];
-}
-
 // 工作区整理提出的跨项目候选，来源指向已验证的会话事件。
 export interface GlobalDreamingCandidate {
   content: string;

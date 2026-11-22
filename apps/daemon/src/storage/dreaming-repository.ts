@@ -341,10 +341,12 @@ export class SqliteDreamingRepository {
       );
   }
 
-  // 获取尚未开始分析的 Run，按启动顺序供调度使用。
+  // 按 Session 分组并按启动顺序读取待处理 Run，供单个工作区 Agent 依次处理。
   public listPendingRuns(): DreamingRunRecord[] {
     const rows = this.database
-      .prepare("SELECT run_id FROM dreaming_runs WHERE status = ? ORDER BY started_at, run_id")
+      .prepare(
+        "SELECT run_id FROM dreaming_runs WHERE status = ? ORDER BY session_id, started_at, run_id",
+      )
       .all(RunStatus.PENDING);
     return rows.flatMap((row) => {
       const run = this.findRun(String(row.run_id));
@@ -352,29 +354,20 @@ export class SqliteDreamingRepository {
     });
   }
 
-  // 读取等待整理的候选，按完成时间组成工作区批次。
-  public listPendingConsolidation(): DreamingRunRecord[] {
-    const rows = this.database
-      .prepare(
-        "SELECT run_id FROM dreaming_runs WHERE status = ? ORDER BY workspace_id, updated_at, run_id",
-      )
-      .all(RunStatus.PENDING_CONSOLIDATION);
-    return rows.flatMap((row) => {
-      const run = this.findRun(String(row.run_id));
-      return run ? [run] : [];
-    });
-  }
-
-  // 同一事务领取本批 Run，避免部分候选被重复整理。
-  public claimConsolidation(runIds: readonly string[], updatedAt: number): boolean {
+  // 同一事务领取待整理的 Run，避免重复启动整理 Agent。
+  public claimPendingRuns(
+    runIds: readonly string[],
+    workspaceId: string,
+    updatedAt: number,
+  ): boolean {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const update = this.database.prepare(
-        "UPDATE dreaming_runs SET status = ?, updated_at = ? WHERE run_id = ? AND status = ?",
+        "UPDATE dreaming_runs SET status = ?, candidates_json = NULL, updated_at = ? WHERE run_id = ? AND workspace_id = ? AND status = ?",
       );
       for (const runId of runIds) {
         if (
-          update.run(RunStatus.CONSOLIDATING, updatedAt, runId, RunStatus.PENDING_CONSOLIDATION)
+          update.run(RunStatus.CONSOLIDATING, updatedAt, runId, workspaceId, RunStatus.PENDING)
             .changes !== 1
         ) {
           this.database.exec("ROLLBACK");
@@ -584,17 +577,6 @@ export class SqliteDreamingRepository {
     };
   }
 
-  // 原子领取待分析的 Run，防止重复启动。
-  public claimRun(runId: string, updatedAt: number): boolean {
-    return (
-      this.database
-        .prepare(
-          "UPDATE dreaming_runs SET status = ?, updated_at = ? WHERE run_id = ? AND status = ?",
-        )
-        .run(RunStatus.ANALYZING, updatedAt, runId, RunStatus.PENDING).changes === 1
-    );
-  }
-
   // 在调用方事务内写入工作区记忆、版本、来源和索引。
   private applyWorkspaceMemoryChange(input: {
     workspaceId: string;
@@ -790,7 +772,6 @@ export class SqliteDreamingRepository {
       const runIds = input.runIds ?? [input.runId];
       if (
         runIds.length < 1 ||
-        runIds.length > 2 ||
         !runIds.includes(input.runId) ||
         new Set(runIds).size !== runIds.length
       )

@@ -14,13 +14,15 @@ import {
 } from "@pi-harness/memory";
 import type { SqliteDreamingRepository } from "../storage/dreaming-repository.js";
 import type { SqliteMemoryRepository } from "../storage/memory-repository.js";
-import { ID_PATTERN, readWiki } from "../utils/dreaming-wiki.js";
+import {
+  DEFAULT_MEMORY_CONTEXT,
+  EMPTY_WIKI_INDEX,
+  ID_PATTERN,
+  readWiki,
+} from "../utils/dreaming-wiki.js";
 
 const CONTEXT_BUDGET = 2_000;
 const INDEX_BUDGET = 4_000;
-const CONTEXT_NAVIGATION = "导航：[索引](index.md)";
-const EMPTY_INDEX = "# 索引\n\n暂无主题。\n";
-const DEFAULT_CONTEXT = `# 注入上下文\n\n${CONTEXT_NAVIGATION}\n`;
 
 function normalizeContent(content: string): string {
   const trimmed = content.trim().replaceAll(/\s+/g, " ");
@@ -116,11 +118,11 @@ export class MemoryRecorderService implements MemoryRecorder {
       if (!ID_PATTERN.test(current.directoryId)) throw new Error("Invalid Wiki directory");
       const directory = join(this.root, "dreaming", workspaceId, current.directoryId);
       const files = await readWiki(directory);
-      const index = files.get("index.md") ?? EMPTY_INDEX;
+      const index = files.get("index.md") ?? EMPTY_WIKI_INDEX;
       if (index.length > INDEX_BUDGET) return false;
       const existingContext = files.get("context.md")?.trim()
         ? (files.get("context.md") ?? "")
-        : DEFAULT_CONTEXT;
+        : DEFAULT_MEMORY_CONTEXT;
       const context = appendContextEntry(existingContext, content);
       if (context === null) return false;
       if (context === existingContext) return true;
@@ -132,7 +134,7 @@ export class MemoryRecorderService implements MemoryRecorder {
         ...(signal ? { signal } : {}),
       });
       if (!files.has("index.md"))
-        await writeFile(join(directory, "index.md"), EMPTY_INDEX, {
+        await writeFile(join(directory, "index.md"), EMPTY_WIKI_INDEX, {
           encoding: "utf8",
           ...(signal ? { signal } : {}),
         });
@@ -149,7 +151,7 @@ export class MemoryRecorderService implements MemoryRecorder {
     content: string,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    const context = appendContextEntry(DEFAULT_CONTEXT, content);
+    const context = appendContextEntry(DEFAULT_MEMORY_CONTEXT, content);
     if (context === null) return false;
     const directoryId = randomUUID();
     const directory = join(this.root, "dreaming", workspaceId, directoryId);
@@ -159,7 +161,7 @@ export class MemoryRecorderService implements MemoryRecorder {
         encoding: "utf8",
         ...(signal ? { signal } : {}),
       });
-      await writeFile(join(directory, "index.md"), EMPTY_INDEX, {
+      await writeFile(join(directory, "index.md"), EMPTY_WIKI_INDEX, {
         encoding: "utf8",
         ...(signal ? { signal } : {}),
       });

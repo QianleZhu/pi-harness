@@ -1,10 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createAgent } from "@pi-harness/agent-runtime";
+import {
+  type ContextCompactedData,
+  createAgent,
+  type HarnessEvent,
+  projectContext,
+} from "@pi-harness/agent-runtime";
 import {
   createDreamingTools,
-  DREAMING_CONSOLIDATION_PROMPT,
+  DREAMING_AGENT_PROMPT,
   type DreamingMemoryChange,
   DreamingRunStatus,
   type GlobalDreamingCandidate,
@@ -16,15 +21,21 @@ import type { SessionRepository } from "../storage/database.js";
 import type { SqliteDreamingRepository } from "../storage/dreaming-repository.js";
 import type { SqliteMemoryRepository } from "../storage/memory-repository.js";
 import type { SessionEventStore } from "../storage/session-event-store.js";
-import { readStoredCandidates, textData } from "../utils/dreaming-analysis.js";
-import { ID_PATTERN, readWiki, validateWiki } from "../utils/dreaming-wiki.js";
-import { DreamingAnalysisService } from "./dreaming-analysis-service.js";
+import { selectRunEvents, textData } from "../utils/dreaming-events.js";
+import {
+  DEFAULT_MEMORY_CONTEXT,
+  ID_PATTERN,
+  readWiki,
+  stripRecordedMemorySection,
+  validateWiki,
+} from "../utils/dreaming-wiki.js";
 import type { GlobalDreamingService } from "./global-dreaming-service.js";
 import type { ProviderService } from "./provider-service.js";
 
-// 串联单 Run 分析、整理草案和数据库发布。
+const DREAMING_TIMEOUT_MS = 20 * 60_000;
+
+// 一个工作区只运行一个带工具的 Agent，依次审计该工作区的所有待处理 Run。
 export class DreamingService {
-  private readonly analysis: DreamingAnalysisService;
   public constructor(
     private readonly root: string,
     private readonly sessions: SessionRepository,
@@ -35,61 +46,10 @@ export class DreamingService {
     private readonly dreaming: SqliteDreamingRepository,
     private readonly embedder: MemoryEmbedder,
     private readonly globalService: GlobalDreamingService,
-  ) {
-    this.analysis = new DreamingAnalysisService(sessions, events, providers);
-  }
+  ) {}
 
-  // 提取单个 Run 的候选，并在进入整理队列前持久化。
-  public async analyzeRun(input: {
-    workspaceId: string;
-    sessionId: string;
-    runId: string;
-    providerId: string;
-    modelId: string;
-    signal?: AbortSignal;
-  }): Promise<void> {
-    const run = this.dreaming.findRun(input.runId);
-    if (
-      !run ||
-      run.workspaceId !== input.workspaceId ||
-      run.sessionId !== input.sessionId ||
-      run.status !== DreamingRunStatus.PENDING
-    )
-      throw new Error("Dreaming run is not pending");
-    if (!ID_PATTERN.test(input.workspaceId)) throw new Error("Invalid workspace ID");
-    const resolved = await this.providers.resolveRunModel(input.providerId, input.modelId);
-    const signal = input.signal
-      ? AbortSignal.any([input.signal, AbortSignal.timeout(120_000)])
-      : AbortSignal.timeout(120_000);
-    signal.throwIfAborted();
-    const settings = this.memories.getSettings();
-    if (!settings.useMemories || !settings.generateMemories)
-      throw new Error("Dreaming learning is disabled");
-    if (!this.dreaming.claimRun(input.runId, Date.now()))
-      throw new Error("Dreaming run already claimed");
-    try {
-      const candidates = await this.analysis.analyze({ ...input, signal }, resolved);
-      this.dreaming.saveRun({
-        ...run,
-        status: candidates.length
-          ? DreamingRunStatus.PENDING_CONSOLIDATION
-          : DreamingRunStatus.NO_CANDIDATES,
-        candidatesJson: candidates.length ? JSON.stringify(candidates) : null,
-        updatedAt: Date.now(),
-      });
-    } catch (error: unknown) {
-      this.dreaming.saveRun({
-        ...run,
-        status: DreamingRunStatus.FAILED,
-        candidatesJson: null,
-        updatedAt: Date.now(),
-      });
-      throw error;
-    }
-  }
-
-  // 同一工作区的一到两个 Run 共用整理草案并原子发布。
-  public async consolidateRuns(input: {
+  // 同一工作区的全部待处理 Run 由一个 Agent 依次审计，并原子发布结果。
+  public async processRuns(input: {
     workspaceId: string;
     runIds: readonly string[];
     providerId: string;
@@ -99,7 +59,6 @@ export class DreamingService {
     const runIds = input.runIds;
     if (
       runIds.length < 1 ||
-      runIds.length > 2 ||
       new Set(runIds).size !== runIds.length ||
       !ID_PATTERN.test(input.workspaceId)
     )
@@ -108,38 +67,39 @@ export class DreamingService {
     if (
       runs.some(
         (run) =>
-          !run ||
-          run.workspaceId !== input.workspaceId ||
-          run.status !== DreamingRunStatus.PENDING_CONSOLIDATION ||
-          run.candidatesJson === null,
+          !run || run.workspaceId !== input.workspaceId || run.status !== DreamingRunStatus.PENDING,
       )
     )
       throw new Error("Dreaming batch is not pending");
-    const first = runs[0];
+    const batchRuns = runs.filter((run): run is NonNullable<typeof run> => run !== null);
+    if (batchRuns.length !== runIds.length) throw new Error("Dreaming run missing");
+    const first = batchRuns[0];
     if (!first) throw new Error("Dreaming batch is empty");
     const resolved = await this.providers.resolveRunModel(input.providerId, input.modelId);
     const signal = input.signal
-      ? AbortSignal.any([input.signal, AbortSignal.timeout(300_000)])
-      : AbortSignal.timeout(300_000);
+      ? AbortSignal.any([input.signal, AbortSignal.timeout(DREAMING_TIMEOUT_MS)])
+      : AbortSignal.timeout(DREAMING_TIMEOUT_MS);
     signal.throwIfAborted();
-    if (!this.dreaming.claimConsolidation(runIds, Date.now()))
+    const settings = this.memories.getSettings();
+    if (!settings.useMemories || !settings.generateMemories)
+      throw new Error("Dreaming learning is disabled");
+    if (!this.dreaming.claimPendingRuns(runIds, input.workspaceId, Date.now()))
       throw new Error("Dreaming batch already claimed");
+
+    const runEvents = new Map<string, readonly HarnessEvent[]>();
+    try {
+      for (const run of batchRuns) {
+        const snapshot = await this.events.load(run.sessionId, signal);
+        runEvents.set(run.runId, selectRunEvents(snapshot.events, run.runId));
+      }
+    } catch (error: unknown) {
+      this.dreaming.failConsolidation(runIds, Date.now());
+      throw error;
+    }
+
     let directory: string | null = null;
     let published = false;
-    const toolInput = {
-      workspaceId: input.workspaceId,
-      sessionId: first.sessionId,
-      runId: first.runId,
-    };
     try {
-      const groups = runs.map((run) => {
-        if (!run?.candidatesJson) throw new Error("Dreaming candidates missing");
-        return { run, candidates: readStoredCandidates(run.candidatesJson) };
-      });
-      const candidates = groups.flatMap((group) => group.candidates);
-      const candidateRuns = groups.flatMap((group) =>
-        group.candidates.map(() => ({ sessionId: group.run.sessionId, runId: group.run.runId })),
-      );
       const currentWiki = this.dreaming.findWiki(input.workspaceId);
       if (currentWiki && !ID_PATTERN.test(currentWiki.directoryId))
         throw new Error("Invalid Wiki directory");
@@ -150,12 +110,13 @@ export class DreamingService {
       const originalFiles = new Map(files);
       const changes: DreamingMemoryChange[] = [];
       const globalCandidates: GlobalDreamingCandidate[] = [];
+      const readRuns = new Set<string>();
       let abortAgent = () => {};
       const tools = createDreamingTools({
-        input: toolInput,
+        input: { workspaceId: input.workspaceId },
         signal,
-        candidates,
-        candidateRuns,
+        runs: runEvents,
+        readRuns,
         files,
         changes,
         globalCandidates,
@@ -167,19 +128,50 @@ export class DreamingService {
         projectEventData: textData,
         onLimit: () => abortAgent(),
       });
+      const agentSessionId = randomUUID();
       const agent = createAgent({
         messages: [],
         model: resolved.model,
-        sessionId: randomUUID(),
-        systemPrompt: DREAMING_CONSOLIDATION_PROMPT,
+        sessionId: agentSessionId,
+        systemPrompt: DREAMING_AGENT_PROMPT,
         streamFn: resolved.streamFn,
         tools,
       });
+      // 复用主 Agent 的上下文压缩：工具结果过多时生成 checkpoint，避免 Dreaming 自己撞窗口。
+      let checkpoint: ContextCompactedData | null = null;
+      agent.transformContext = async (messages, contextSignal) => {
+        const projected = await projectContext({
+          activeRunStartMessageIndex: 0,
+          checkpoint,
+          messages,
+          model: resolved.model,
+          plan: null,
+          todos: null,
+          sessionId: agentSessionId,
+          ...(contextSignal === undefined ? {} : { signal: contextSignal }),
+          streamFn: resolved.streamFn,
+          systemPrompt: agent.state.systemPrompt,
+          tools: agent.state.tools,
+        });
+        if (projected.error) throw new Error(`DREAMING_CONTEXT_EXCEEDED: ${projected.error}`);
+        if (projected.compacted) checkpoint = projected.compacted;
+        return projected.messages;
+      };
       const abort = () => agent.abort();
       abortAgent = abort;
       signal.addEventListener("abort", abort, { once: true });
       try {
-        await agent.prompt(JSON.stringify({ candidates }));
+        await agent.prompt(
+          JSON.stringify({
+            runs: batchRuns.map((run) => ({
+              finishedAt: run.finishedAt,
+              runId: run.runId,
+              sessionId: run.sessionId,
+              startedAt: run.startedAt,
+            })),
+            workspaceId: input.workspaceId,
+          }),
+        );
         signal.throwIfAborted();
       } finally {
         signal.removeEventListener("abort", abort);
@@ -187,7 +179,15 @@ export class DreamingService {
       const last = agent.state.messages.at(-1);
       if (last?.role !== "assistant" || last.stopReason !== "stop")
         throw new Error("Dreaming consolidation failed");
-      // 草案未改变记忆或来源，且 Wiki 内容未变化时，不需要创建发布目录。
+      if (!runIds.every((runId) => readRuns.has(runId)))
+        throw new Error("Dreaming agent did not review every run");
+
+      // 临时区块已由 Agent 融入正式记忆，发布版本必须移除它。
+      const context = files.get("context.md");
+      if (context !== undefined) {
+        const stripped = stripRecordedMemorySection(context);
+        files.set("context.md", stripped.trim() ? stripped : DEFAULT_MEMORY_CONTEXT);
+      }
       const hasMemoryChanges = changes.some((change) => {
         if (change.expectedRevision === null) return true;
         const memory = this.memoryStore.find(change.memoryId);
@@ -268,27 +268,6 @@ export class DreamingService {
         if (directory) await rm(directory, { recursive: true, force: true });
       }
       throw error;
-    }
-  }
-
-  // 为内部调用保留单 Run 的完整整理入口。
-  public async processRun(input: {
-    workspaceId: string;
-    sessionId: string;
-    runId: string;
-    providerId: string;
-    modelId: string;
-    signal?: AbortSignal;
-  }): Promise<void> {
-    await this.analyzeRun(input);
-    if (this.dreaming.findRun(input.runId)?.status === DreamingRunStatus.PENDING_CONSOLIDATION) {
-      await this.consolidateRuns({
-        workspaceId: input.workspaceId,
-        runIds: [input.runId],
-        providerId: input.providerId,
-        modelId: input.modelId,
-        ...(input.signal ? { signal: input.signal } : {}),
-      });
     }
   }
 }

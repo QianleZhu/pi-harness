@@ -27,6 +27,7 @@ export {
   type RestoreAgentInput,
   type StartSessionRunInput,
 } from "./agent-manager.js";
+export { projectContext } from "./context/context-pipeline.js";
 export type { WorkspaceAgentContext } from "./context/workspace-agent-context.js";
 export { createAgent } from "./create-agent.js";
 export {

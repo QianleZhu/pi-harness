@@ -1,4 +1,4 @@
-import { DreamingRunStatus, type MemoryService } from "@pi-harness/memory";
+import type { MemoryService } from "@pi-harness/memory";
 import type {
   DreamingRunRecord,
   SqliteDreamingRepository,
@@ -10,22 +10,17 @@ import type { ProviderService } from "./provider-service.js";
 
 const IDLE_MS = 30 * 60_000;
 const CHECK_INTERVAL_MS = 60_000;
-const ANALYSIS_LIMIT = 2;
+const WORKSPACE_LIMIT = 2;
 
-// 周期扫描待处理 Run，并按队列顺序分配分析名额。
+// 周期扫描待处理 Run，一个工作区只启动一个带工具的整理 Agent。
 export class DreamingScheduler {
   private readonly controller = new AbortController();
-  private readonly activeSessions = new Set<string>();
   private readonly activeWorkspaces = new Set<string>();
   private isGlobalActive = false;
   private readonly activeProviders = new Map<string, number>();
   private readonly tasks = new Set<Promise<void>>();
-  private readonly queue: DreamingRunRecord[] = [];
-  private readonly queuedIds = new Set<string>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private scanTask: Promise<void> | null = null;
-  private drainTask: Promise<void> | null = null;
-  private drainRequested = false;
   private shouldScan = false;
 
   public constructor(
@@ -36,7 +31,7 @@ export class DreamingScheduler {
     private readonly service: DreamingService,
     private readonly isSessionActive: (sessionId: string) => boolean | Promise<boolean>,
     private readonly onError: (
-      phase: "scan" | "analysis" | "consolidation" | "global_consolidation",
+      phase: "scan" | "consolidation" | "global_consolidation",
       ids: readonly string[],
     ) => void,
     private readonly onProviderActivity: (providerId: string, active: boolean) => void = () => {},
@@ -44,7 +39,7 @@ export class DreamingScheduler {
     private readonly globalService?: GlobalDreamingService,
   ) {}
 
-  // 判断是否存在正在分析或整理的后台工作。
+  // 判断是否存在正在运行的整理任务。
   public isActive(): boolean {
     return this.tasks.size > 0;
   }
@@ -77,11 +72,9 @@ export class DreamingScheduler {
     this.controller.abort();
     if (this.timer) clearTimeout(this.timer);
     if (this.scanTask) await this.scanTask;
-    if (this.drainTask) await this.drainTask;
     await Promise.all([...this.tasks]);
   }
 
-  // 合并扫描期间收到的唤醒请求。
   private async scanLoop(): Promise<void> {
     while (this.shouldScan && !this.controller.signal.aborted) {
       this.shouldScan = false;
@@ -93,7 +86,7 @@ export class DreamingScheduler {
     }
   }
 
-  // 扫描符合空闲条件的 Run，并将全部结果按顺序加入等待队列。
+  // 扫描符合空闲条件的 Run，一个工作区收集全部待处理 Run 交给同一个 Agent。
   private async scan(): Promise<void> {
     if (!this.prepareScan()) return;
     const model = this.dreaming.getModel();
@@ -104,31 +97,6 @@ export class DreamingScheduler {
       return;
     }
     if (this.controller.signal.aborted) return;
-
-    const batches = new Map<string, string[]>();
-    for (const run of this.dreaming.listPendingConsolidation()) {
-      if (this.activeWorkspaces.has(run.workspaceId)) continue;
-      const batch = batches.get(run.workspaceId) ?? [];
-      if (batch.length < 2) batch.push(run.runId);
-      batches.set(run.workspaceId, batch);
-    }
-    for (const [workspaceId, runIds] of batches) {
-      this.activeWorkspaces.add(workspaceId);
-      this.track(
-        "consolidation",
-        runIds,
-        model.providerId,
-        () =>
-          this.service.consolidateRuns({
-            workspaceId,
-            runIds,
-            ...model,
-            signal: this.controller.signal,
-          }),
-        () => this.activeWorkspaces.delete(workspaceId),
-      );
-    }
-
     const settings = this.memories.getSettings();
     if (!settings.useMemories || !settings.generateMemories) return;
     if (this.globalService && !this.isGlobalActive && this.globalService.hasPending()) {
@@ -145,108 +113,66 @@ export class DreamingScheduler {
         },
       );
     }
-    const eligible = new Map<string, boolean>();
+
+    const eligibleSessions = new Map<string, boolean>();
+    const batches = new Map<string, DreamingRunRecord[]>();
     for (const run of this.dreaming.listPendingRuns()) {
       if (this.controller.signal.aborted) return;
-      if (this.queuedIds.has(run.runId) || this.activeSessions.has(run.sessionId)) continue;
-      let canQueue = eligible.get(run.sessionId);
-      if (canQueue === undefined) {
-        canQueue = !(await this.isSessionActive(run.sessionId));
-        if (canQueue) {
-          const snapshot = await this.events.load(run.sessionId, this.controller.signal);
-          const lastEvent = snapshot.events.at(-1);
-          canQueue =
-            !!lastEvent &&
-            Date.now() - lastEvent.timestamp >= IDLE_MS &&
-            !(await this.isSessionActive(run.sessionId));
+      if (this.activeWorkspaces.has(run.workspaceId)) continue;
+      let eligible = eligibleSessions.get(run.sessionId);
+      if (eligible === undefined) {
+        eligible = await this.isIdle(run.sessionId);
+        eligibleSessions.set(run.sessionId, eligible);
+      }
+      if (!eligible) continue;
+      const batch = batches.get(run.workspaceId) ?? [];
+      batch.push(run);
+      batches.set(run.workspaceId, batch);
+    }
+
+    for (const [workspaceId, batch] of batches) {
+      if (this.controller.signal.aborted) return;
+      if (this.activeWorkspaces.size >= WORKSPACE_LIMIT) break;
+      if (this.activeWorkspaces.has(workspaceId)) continue;
+      const sessionIds = new Set(batch.map((run) => run.sessionId));
+      let active = false;
+      for (const sessionId of sessionIds) {
+        if (await this.isSessionActive(sessionId)) {
+          active = true;
+          break;
         }
-        eligible.set(run.sessionId, canQueue);
       }
-      if (canQueue) {
-        this.queue.push(run);
-        this.queuedIds.add(run.runId);
-      }
-    }
-    this.drain();
-  }
-
-  // 顺序取队列任务，启动前复查会话活动、记忆开关与持久化状态。
-  private drain(): void {
-    if (this.controller.signal.aborted) return;
-    if (this.drainTask) {
-      this.drainRequested = true;
-      return;
-    }
-    this.drainRequested = false;
-    this.drainTask = this.drainQueue()
-      .catch(() => {
-        if (!this.controller.signal.aborted) this.onError("scan", []);
-      })
-      .finally(() => {
-        this.drainTask = null;
-        if (this.drainRequested) this.drain();
-      });
-  }
-
-  // 名额不足时保留剩余队列，不符合条件的任务留待下次扫描。
-  private async drainQueue(): Promise<void> {
-    while (
-      this.queue.length &&
-      this.activeSessions.size < ANALYSIS_LIMIT &&
-      !this.controller.signal.aborted
-    ) {
-      if (!this.prepareScan()) return;
-      const run = this.queue.shift();
-      if (!run) break;
-      this.queuedIds.delete(run.runId);
-      const settings = this.memories.getSettings();
-      if (
-        !settings.useMemories ||
-        !settings.generateMemories ||
-        this.activeSessions.has(run.sessionId)
-      )
-        continue;
-      if (await this.isSessionActive(run.sessionId)) continue;
-      // 排队期间会话可能再次完成 Run，必须重新计算空闲时间。
-      const snapshot = await this.events.load(run.sessionId, this.controller.signal);
-      const lastEvent = snapshot.events.at(-1);
-      if (
-        !lastEvent ||
-        Date.now() - lastEvent.timestamp < IDLE_MS ||
-        (await this.isSessionActive(run.sessionId))
-      )
-        continue;
-      const current = this.memories.getSettings();
-      const model = this.dreaming.getModel();
-      if (
-        !current.useMemories ||
-        !current.generateMemories ||
-        !model ||
-        this.controller.signal.aborted ||
-        this.dreaming.findRun(run.runId)?.status !== DreamingRunStatus.PENDING
-      )
-        continue;
-      this.activeSessions.add(run.sessionId);
+      if (active) continue;
+      this.activeWorkspaces.add(workspaceId);
+      const runIds = batch.map((run) => run.runId);
       this.track(
-        "analysis",
-        [run.runId],
+        "consolidation",
+        runIds,
         model.providerId,
         () =>
-          this.service.analyzeRun({
-            workspaceId: run.workspaceId,
-            sessionId: run.sessionId,
-            runId: run.runId,
+          this.service.processRuns({
+            workspaceId,
+            runIds,
             ...model,
             signal: this.controller.signal,
           }),
-        () => this.activeSessions.delete(run.sessionId),
+        () => this.activeWorkspaces.delete(workspaceId),
       );
     }
   }
 
-  // 任务完成后只释放名额并消费现有队列，不触发新的扫描。
+  // 只有 Session 没有活动 Run 且最后事件已空闲时才允许启动。
+  private async isIdle(sessionId: string): Promise<boolean> {
+    if (await this.isSessionActive(sessionId)) return false;
+    const snapshot = await this.events.load(sessionId, this.controller.signal);
+    const lastEvent = snapshot.events.at(-1);
+    if (!lastEvent || Date.now() - lastEvent.timestamp < IDLE_MS) return false;
+    return !(await this.isSessionActive(sessionId));
+  }
+
+  // 任务完成后只释放名额，不立即触发新的扫描。
   private track(
-    phase: "analysis" | "consolidation" | "global_consolidation",
+    phase: "consolidation" | "global_consolidation",
     ids: string[],
     providerId: string,
     work: () => Promise<void>,
@@ -266,7 +192,6 @@ export class DreamingScheduler {
           this.onProviderActivity(providerId, false);
         } else this.activeProviders.set(providerId, remaining);
         this.tasks.delete(task);
-        if (phase === "analysis") this.drain();
       });
     this.tasks.add(task);
   }

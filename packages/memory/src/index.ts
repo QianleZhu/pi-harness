@@ -22,8 +22,7 @@ export {
   RECORD_MEMORY_TOOL_NAME,
   SEARCH_MEMORIES_TOOL_NAME,
 } from "./memory-tools.js";
-export { DREAMING_ANALYSIS_PROMPT } from "./prompts/dreaming-analysis-prompt.js";
-export { DREAMING_CONSOLIDATION_PROMPT } from "./prompts/dreaming-consolidation-prompt.js";
+export { DREAMING_AGENT_PROMPT } from "./prompts/dreaming-agent-prompt.js";
 export { GLOBAL_DREAMING_PROMPT } from "./prompts/global-dreaming-prompt.js";
 export { createDreamingTools } from "./tools/dreaming-tools.js";
 export { createGlobalDreamingTools } from "./tools/global-dreaming-tools.js";

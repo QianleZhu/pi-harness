@@ -368,6 +368,7 @@ export class AgentManager {
         input.sessionId,
         input.workspaceId,
         () => this.memorySnapshots.get(input.sessionId) ?? null,
+        () => runtime?.activeRunId ?? null,
       ),
       ...createDreamingReadTools(
         this.memory,

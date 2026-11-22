@@ -63,6 +63,26 @@ export interface GlobalDreamingMemoryChange extends DreamingMemoryChange {
 // Wiki 草案只接受单层 Markdown 文件名。
 export const DREAMING_WIKI_NAME_PATTERN = /^(?:index|context|[a-z0-9][a-z0-9_-]{0,63})\.md$/;
 
+// Agent 在 Run 中主动记录的工作区记忆，后续由 Dreaming 用会话日志校验。
+export interface RecordMemoryInput {
+  workspaceId: string;
+  sessionId: string;
+  runId: string;
+  content: string;
+  applicability: string | null;
+  evidenceStatus: MemoryEvidenceStatus;
+}
+
+export interface RecordedMemory {
+  memoryId: string;
+  revision: number;
+  created: boolean;
+  contextUpdated: boolean;
+}
+
+// 主动记录的记忆在第一层单独隔开，Dreaming 后续负责校验和整理。
+export const RECORDED_MEMORY_CONTEXT_HEADING = "## 当前运行记录的长期记忆";
+
 // 一个 Run 在 Dreaming 工作流中的状态。
 export const DreamingRunStatus = {
   WAITING: "waiting",

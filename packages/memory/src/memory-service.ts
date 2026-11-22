@@ -14,6 +14,7 @@ import {
   UserProfileFacet,
   type UserProfileFacet as UserProfileFacetValue,
 } from "./contract.js";
+import type { RecordedMemory, RecordMemoryInput } from "./dreaming.js";
 import { buildMemoryContextPrompt } from "./prompts/memory-context-prompt.js";
 
 export const MemoryErrorCode = {
@@ -21,6 +22,7 @@ export const MemoryErrorCode = {
   DUPLICATE: "MEMORY_DUPLICATE",
   EMBEDDING_FAILED: "MEMORY_EMBEDDING_FAILED",
   INVALID: "MEMORY_INVALID",
+  LEARNING_DISABLED: "MEMORY_LEARNING_DISABLED",
   NOT_FOUND: "MEMORY_NOT_FOUND",
   WORKSPACE_NOT_FOUND: "MEMORY_WORKSPACE_NOT_FOUND",
 } as const;
@@ -146,6 +148,11 @@ export interface DreamingReader {
   ): Promise<unknown>;
 }
 
+// 主 Agent 在工作过程中写入第三层记忆摘要，并同步追加第一层临时入口。
+export interface MemoryRecorder {
+  record(input: RecordMemoryInput, signal?: AbortSignal): Promise<RecordedMemory>;
+}
+
 export interface MemoryRuntime {
   captureSnapshot(workspaceId: string): RunMemorySnapshot | null;
   buildContext(
@@ -174,6 +181,7 @@ export interface MemoryRuntime {
     signal?: AbortSignal,
     snapshot?: RunMemorySnapshot | null,
   ): Promise<unknown>;
+  recordMemory(input: RecordMemoryInput, signal?: AbortSignal): Promise<RecordedMemory>;
   createFromSession(
     input: {
       content: string;
@@ -266,6 +274,7 @@ export class MemoryService implements MemoryRuntime {
     private readonly repository: MemoryRepository,
     private readonly embedder: MemoryEmbedder,
     private readonly dreaming?: DreamingReader,
+    private readonly recorder?: MemoryRecorder,
   ) {}
 
   // 为主 Run 固定记忆和 Wiki 的发布版本。
@@ -324,6 +333,22 @@ export class MemoryService implements MemoryRuntime {
       signal,
       snapshot ?? undefined,
     );
+  }
+
+  // 主 Agent 仅在允许学习时写入第三层记忆摘要。
+  public recordMemory(input: RecordMemoryInput, signal?: AbortSignal): Promise<RecordedMemory> {
+    return this.withMutation(() => {
+      this.assertLearningEnabled();
+      if (!this.recorder)
+        throw new MemoryError(MemoryErrorCode.INVALID, "当前运行未配置记忆写入能力");
+      return this.recorder.record(input, signal);
+    });
+  }
+
+  private assertLearningEnabled(): void {
+    const settings = this.repository.getSettings();
+    if (!settings.useMemories || !settings.generateMemories)
+      throw new MemoryError(MemoryErrorCode.LEARNING_DISABLED, "已关闭从对话中学习记忆");
   }
 
   public getState(): MemoryState {

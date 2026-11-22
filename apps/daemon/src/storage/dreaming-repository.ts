@@ -595,6 +595,181 @@ export class SqliteDreamingRepository {
     );
   }
 
+  // 在调用方事务内写入工作区记忆、版本、来源和索引。
+  private applyWorkspaceMemoryChange(input: {
+    workspaceId: string;
+    change: DreamingMemoryChange;
+    defaultSessionId: string;
+    now: number;
+  }): { memoryId: string; revision: number; created: boolean } {
+    const { change, workspaceId } = input;
+    const content = change.content.trim().replaceAll(/\s+/g, " ");
+    if (!content || content.length > 500) throw new Error("Invalid memory content");
+    const normalized = content.toLocaleLowerCase();
+    const expectedRevision = change.expectedRevision;
+    const created = expectedRevision === null;
+    let revision = 1;
+    if (created) {
+      this.database
+        .prepare(`INSERT INTO memories
+        (id, content, normalized_content, profile_facet, scope, workspace_id, status, source_type, source_session_id, revision, created_at, updated_at)
+        VALUES (?, ?, ?, NULL, 'workspace', ?, 'saved', 'session', ?, 1, ?, ?)`)
+        .run(
+          change.memoryId,
+          content,
+          normalized,
+          workspaceId,
+          change.sources[0]?.sessionId ?? input.defaultSessionId,
+          input.now,
+          input.now,
+        );
+    } else {
+      const current = this.database
+        .prepare("SELECT * FROM memories WHERE id = ? AND workspace_id = ? AND scope = 'workspace'")
+        .get(change.memoryId, workspaceId);
+      if (!current || current.revision !== expectedRevision)
+        throw new Error("Dreaming memory revision conflict");
+      // 若当前版本来自手动修改，先保留该版本，避免覆盖旧内容。
+      this.database
+        .prepare(`INSERT OR IGNORE INTO memory_revisions
+        (memory_id, revision, content, applicability, evidence_status, created_at) VALUES (?, ?, ?, NULL, 'unverified', ?)`)
+        .run(
+          change.memoryId,
+          expectedRevision,
+          String(current.content),
+          Number(current.updated_at),
+        );
+      this.database
+        .prepare(`INSERT OR IGNORE INTO memory_revision_embeddings
+        (memory_id, revision, model_id, dimensions, embedding)
+        SELECT memory_id, memory_revision, model_id, dimensions, embedding FROM memory_embeddings
+        WHERE memory_id = ? AND memory_revision = ?`)
+        .run(change.memoryId, expectedRevision);
+      // 来源集合发生变化时也发布新版本，旧版本的来源保持不变。
+      const previous = this.findRevision(change.memoryId, expectedRevision);
+      revision = resolveDreamingRevision(
+        change,
+        { content: String(current.content), revision: expectedRevision },
+        previous,
+        this.listSources(change.memoryId, expectedRevision),
+      );
+      if (revision === expectedRevision)
+        return { created: false, memoryId: change.memoryId, revision };
+      this.database
+        .prepare(
+          `UPDATE memories SET content = ?, normalized_content = ?, revision = ?, updated_at = ? WHERE id = ?`,
+        )
+        .run(content, normalized, revision, input.now, change.memoryId);
+      this.database.prepare("DELETE FROM memory_search WHERE memory_id = ?").run(change.memoryId);
+      this.database
+        .prepare("DELETE FROM memory_embeddings WHERE memory_id = ?")
+        .run(change.memoryId);
+    }
+    this.database
+      .prepare("INSERT INTO memory_search (memory_id, content) VALUES (?, ?)")
+      .run(change.memoryId, content);
+    if (change.embedding) {
+      const embedding = change.embedding;
+      this.database
+        .prepare(`INSERT INTO memory_embeddings
+        (memory_id, model_id, dimensions, embedding, memory_revision, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
+        .run(
+          change.memoryId,
+          embedding.modelId,
+          embedding.dimensions,
+          new Uint8Array(Float32Array.from(embedding.values).buffer),
+          revision,
+          input.now,
+        );
+    }
+    this.createRevision({
+      memoryId: change.memoryId,
+      revision,
+      content,
+      applicability: change.applicability,
+      evidenceStatus: change.evidenceStatus,
+      createdAt: input.now,
+    });
+    if (change.embedding) {
+      this.database
+        .prepare(`INSERT INTO memory_revision_embeddings
+        (memory_id, revision, model_id, dimensions, embedding) VALUES (?, ?, ?, ?, ?)`)
+        .run(
+          change.memoryId,
+          revision,
+          change.embedding.modelId,
+          change.embedding.dimensions,
+          new Uint8Array(Float32Array.from(change.embedding.values).buffer),
+        );
+    }
+    if (expectedRevision !== null) {
+      // 新版本保留此前可追溯的来源。
+      this.database
+        .prepare(`INSERT INTO memory_revision_sources (memory_id, revision, session_id, run_id, event_id, event_seq)
+        SELECT memory_id, ?, session_id, run_id, event_id, event_seq FROM memory_revision_sources WHERE memory_id = ? AND revision = ?`)
+        .run(revision, change.memoryId, expectedRevision);
+    }
+    for (const source of change.sources)
+      this.database
+        .prepare(`INSERT OR IGNORE INTO memory_revision_sources
+        (memory_id, revision, session_id, run_id, event_id, event_seq) VALUES (?, ?, ?, ?, ?, ?)`)
+        .run(
+          change.memoryId,
+          revision,
+          source.sessionId,
+          source.runId,
+          source.eventId,
+          source.eventSeq,
+        );
+    return { created, memoryId: change.memoryId, revision };
+  }
+
+  // 主 Agent 记录一条工作区记忆，与 Dreaming 共用版本和索引结构。
+  public recordWorkspaceMemory(input: {
+    workspaceId: string;
+    sessionId: string;
+    change: DreamingMemoryChange;
+    now: number;
+  }): { memoryId: string; revision: number; created: boolean } {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.applyWorkspaceMemoryChange({
+        workspaceId: input.workspaceId,
+        change: input.change,
+        defaultSessionId: input.sessionId,
+        now: input.now,
+      });
+      this.database.exec("COMMIT");
+      return result;
+    } catch (error: unknown) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  // 主 Agent 发布仅包含 Wiki 变化的新版本。
+  public publishWiki(input: {
+    workspaceId: string;
+    directoryId: string;
+    expectedDirectoryId: string | null;
+    now: number;
+  }): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      if ((this.findWiki(input.workspaceId)?.directoryId ?? null) !== input.expectedDirectoryId)
+        throw new Error("Dreaming Wiki changed");
+      this.saveWiki({
+        workspaceId: input.workspaceId,
+        directoryId: input.directoryId,
+        updatedAt: input.now,
+      });
+      this.database.exec("COMMIT");
+    } catch (error: unknown) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   // 将草案的记忆、来源、索引、Wiki 指针和 Run 状态作为一个事务发布。
   public publish(input: {
     workspaceId: string;
@@ -652,125 +827,12 @@ export class SqliteDreamingRepository {
       for (const change of input.changes) {
         if (seen.has(change.memoryId)) throw new Error("Duplicate memory change");
         seen.add(change.memoryId);
-        const content = change.content.trim().replaceAll(/\s+/g, " ");
-        if (!content || content.length > 500) throw new Error("Invalid memory content");
-        const normalized = content.toLocaleLowerCase();
-        let revision = 1;
-        if (change.expectedRevision === null) {
-          this.database
-            .prepare(`INSERT INTO memories
-            (id, content, normalized_content, profile_facet, scope, workspace_id, status, source_type, source_session_id, revision, created_at, updated_at)
-            VALUES (?, ?, ?, NULL, 'workspace', ?, 'saved', 'session', ?, 1, ?, ?)`)
-            .run(
-              change.memoryId,
-              content,
-              normalized,
-              input.workspaceId,
-              change.sources[0]?.sessionId ?? run.sessionId,
-              input.now,
-              input.now,
-            );
-        } else {
-          const current = this.database
-            .prepare(
-              "SELECT * FROM memories WHERE id = ? AND workspace_id = ? AND scope = 'workspace'",
-            )
-            .get(change.memoryId, input.workspaceId);
-          if (!current || current.revision !== change.expectedRevision)
-            throw new Error("Dreaming memory revision conflict");
-          // 若当前版本来自手动修改，先保留该版本，避免覆盖旧内容。
-          this.database
-            .prepare(`INSERT OR IGNORE INTO memory_revisions
-            (memory_id, revision, content, applicability, evidence_status, created_at) VALUES (?, ?, ?, NULL, 'unverified', ?)`)
-            .run(
-              change.memoryId,
-              change.expectedRevision,
-              String(current.content),
-              Number(current.updated_at),
-            );
-          this.database
-            .prepare(`INSERT OR IGNORE INTO memory_revision_embeddings
-            (memory_id, revision, model_id, dimensions, embedding)
-            SELECT memory_id, memory_revision, model_id, dimensions, embedding FROM memory_embeddings
-            WHERE memory_id = ? AND memory_revision = ?`)
-            .run(change.memoryId, change.expectedRevision);
-          // 来源集合发生变化时也发布新版本，旧版本的来源保持不变。
-          const previous = this.findRevision(change.memoryId, change.expectedRevision);
-          revision = resolveDreamingRevision(
-            change,
-            { content: String(current.content), revision: change.expectedRevision },
-            previous,
-            this.listSources(change.memoryId, change.expectedRevision),
-          );
-          if (revision === change.expectedRevision) continue;
-          this.database
-            .prepare(
-              `UPDATE memories SET content = ?, normalized_content = ?, revision = ?, updated_at = ? WHERE id = ?`,
-            )
-            .run(content, normalized, revision, input.now, change.memoryId);
-          this.database
-            .prepare("DELETE FROM memory_search WHERE memory_id = ?")
-            .run(change.memoryId);
-          this.database
-            .prepare("DELETE FROM memory_embeddings WHERE memory_id = ?")
-            .run(change.memoryId);
-        }
-        this.database
-          .prepare("INSERT INTO memory_search (memory_id, content) VALUES (?, ?)")
-          .run(change.memoryId, content);
-        if (change.embedding) {
-          const embedding = change.embedding;
-          this.database
-            .prepare(`INSERT INTO memory_embeddings
-            (memory_id, model_id, dimensions, embedding, memory_revision, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
-            .run(
-              change.memoryId,
-              embedding.modelId,
-              embedding.dimensions,
-              new Uint8Array(Float32Array.from(embedding.values).buffer),
-              revision,
-              input.now,
-            );
-        }
-        this.createRevision({
-          memoryId: change.memoryId,
-          revision,
-          content,
-          applicability: change.applicability,
-          evidenceStatus: change.evidenceStatus,
-          createdAt: input.now,
+        this.applyWorkspaceMemoryChange({
+          workspaceId: input.workspaceId,
+          change,
+          defaultSessionId: run.sessionId,
+          now: input.now,
         });
-        if (change.embedding) {
-          this.database
-            .prepare(`INSERT INTO memory_revision_embeddings
-            (memory_id, revision, model_id, dimensions, embedding) VALUES (?, ?, ?, ?, ?)`)
-            .run(
-              change.memoryId,
-              revision,
-              change.embedding.modelId,
-              change.embedding.dimensions,
-              new Uint8Array(Float32Array.from(change.embedding.values).buffer),
-            );
-        }
-        if (change.expectedRevision !== null) {
-          // 新版本保留此前可追溯的来源。
-          this.database
-            .prepare(`INSERT INTO memory_revision_sources (memory_id, revision, session_id, run_id, event_id, event_seq)
-            SELECT memory_id, ?, session_id, run_id, event_id, event_seq FROM memory_revision_sources WHERE memory_id = ? AND revision = ?`)
-            .run(revision, change.memoryId, change.expectedRevision);
-        }
-        for (const source of change.sources)
-          this.database
-            .prepare(`INSERT OR IGNORE INTO memory_revision_sources
-            (memory_id, revision, session_id, run_id, event_id, event_seq) VALUES (?, ?, ?, ?, ?, ?)`)
-            .run(
-              change.memoryId,
-              revision,
-              source.sessionId,
-              source.runId,
-              source.eventId,
-              source.eventSeq,
-            );
       }
       this.saveWiki({
         workspaceId: input.workspaceId,

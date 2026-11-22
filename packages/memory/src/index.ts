@@ -7,6 +7,7 @@ export {
   type MemoryEmbedding,
   MemoryError,
   MemoryErrorCode,
+  type MemoryRecorder,
   type MemoryRepository,
   type MemoryRuntime,
   MemoryService,
@@ -18,6 +19,7 @@ export {
 export {
   createMemoryToolRegistrations,
   type MemoryToolRegistration,
+  RECORD_MEMORY_TOOL_NAME,
   SEARCH_MEMORIES_TOOL_NAME,
 } from "./memory-tools.js";
 export { DREAMING_ANALYSIS_PROMPT } from "./prompts/dreaming-analysis-prompt.js";

@@ -3,12 +3,14 @@ import { ToolPermission, type ToolPolicy } from "@pi-harness/policy";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { MemoryScope, UserProfileFacetSchema } from "./contract.js";
+import { MemoryEvidenceStatus } from "./dreaming.js";
 import type { MemoryRuntime, RunMemorySnapshot } from "./memory-service.js";
 
 const TOOL_TIMEOUT_MS = 30_000;
 const MEMORY_TOOL_SOURCE = "memory";
 // 记忆检索工具名称供 Agent 工具注册和子 Agent 授权共用。
 export const SEARCH_MEMORIES_TOOL_NAME = "search_memories";
+export const RECORD_MEMORY_TOOL_NAME = "record_memory";
 
 const SearchMemoriesParameters = Type.Object({
   limit: Type.Optional(Type.Integer({ maximum: 50, minimum: 1 })),
@@ -28,6 +30,16 @@ const UpdateMemoryParameters = Type.Object({
 const DeleteMemoryParameters = Type.Object({
   expectedRevision: Type.Integer({ minimum: 1 }),
   memoryId: Type.String({ format: "uuid" }),
+});
+const RecordableEvidenceStatus = Type.Union([
+  Type.Literal(MemoryEvidenceStatus.USER_STATED),
+  Type.Literal(MemoryEvidenceStatus.PRACTICED),
+  Type.Literal(MemoryEvidenceStatus.UNVERIFIED),
+]);
+const RecordMemoryParameters = Type.Object({
+  applicability: Type.Union([Type.String({ maxLength: 500 }), Type.Null()]),
+  content: Type.String({ maxLength: 500, minLength: 1 }),
+  evidenceStatus: RecordableEvidenceStatus,
 });
 
 export interface MemoryToolRegistration {
@@ -56,6 +68,37 @@ function createSearchTool(
     async execute(_toolCallId, input, signal) {
       return textResult(
         await memory.search(input.query, workspaceId, input.limit, signal, getSnapshot()),
+      );
+    },
+  };
+}
+
+function createRecordMemoryTool(
+  memory: MemoryRuntime,
+  sessionId: string,
+  workspaceId: string,
+  getRunId: () => string | null,
+): AgentTool<typeof RecordMemoryParameters> {
+  return {
+    description:
+      "在工作过程中记录当前工作区值得后续复用的项目事实、决策或经验。内容会写入工作区长期记忆，并追加到注入上下文的独立区块；Dreaming 后续用会话日志校验。不要保存秘密、临时进度、工作区已有明确规则或跨项目用户画像。",
+    executionMode: "sequential",
+    label: "Record memory",
+    name: RECORD_MEMORY_TOOL_NAME,
+    parameters: RecordMemoryParameters,
+    async execute(_toolCallId, input, signal) {
+      const runId = getRunId();
+      if (!runId) throw new Error("MEMORY_INVALID: 当前没有活动 Run");
+      return textResult(
+        await memory.recordMemory(
+          {
+            ...input,
+            sessionId,
+            workspaceId,
+            runId,
+          },
+          signal,
+        ),
       );
     },
   };
@@ -161,13 +204,41 @@ function memoryMutationPolicy(
   };
 }
 
+function learningPolicy(
+  memory: MemoryRuntime,
+  parameters: typeof RecordMemoryParameters,
+  summary: string,
+  risk: string,
+  target: (args: unknown) => string,
+): ToolPolicy {
+  return {
+    allowInFullAccess: true,
+    permission: ToolPermission.USER_APPROVAL,
+    resolveGrant(args) {
+      if (!Value.Check(parameters, args)) throw new Error("MEMORY_INVALID: 无效记忆参数");
+      const settings = memory.getSettings();
+      return {
+        allowSession: false,
+        allowSimilar: false,
+        fingerprint: JSON.stringify(args),
+        isGranted: settings.useMemories && settings.generateMemories,
+        risk,
+        summary,
+        target: target(args),
+      };
+    },
+  };
+}
+
 export function createMemoryToolRegistrations(
   memory: MemoryRuntime,
   sessionId: string,
   workspaceId: string,
   getSnapshot: () => RunMemorySnapshot | null = () => null,
+  getRunId: () => string | null = () => null,
 ): readonly MemoryToolRegistration[] {
   const search = createSearchTool(memory, workspaceId, getSnapshot);
+  const record = createRecordMemoryTool(memory, sessionId, workspaceId, getRunId);
   const save = createSaveTool(memory, sessionId, workspaceId);
   const update = createUpdateTool(memory, workspaceId);
   const remove = createDeleteTool(memory, workspaceId);
@@ -177,6 +248,18 @@ export function createMemoryToolRegistrations(
       source: MEMORY_TOOL_SOURCE,
       timeoutMs: TOOL_TIMEOUT_MS,
       tool: search,
+    },
+    {
+      policy: learningPolicy(
+        memory,
+        RecordMemoryParameters,
+        "记录工作区记忆",
+        "该内容会作为工作区长期记忆进入后续对话，并追加到注入上下文，等待 Dreaming 用会话日志校验。",
+        (args) => (args as Static<typeof RecordMemoryParameters>).content,
+      ),
+      source: MEMORY_TOOL_SOURCE,
+      timeoutMs: TOOL_TIMEOUT_MS,
+      tool: record,
     },
     {
       policy: memoryMutationPolicy(

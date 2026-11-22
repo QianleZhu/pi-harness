@@ -34,6 +34,7 @@ import { McpDiagnosticsService } from "../services/mcp-diagnostics-service.js";
 import { McpOAuthService } from "../services/mcp-oauth-service.js";
 import { McpServerService } from "../services/mcp-server-service.js";
 import { McpToolService } from "../services/mcp-tool-service.js";
+import { MemoryRecorderService } from "../services/memory-recorder.js";
 import { ProviderService } from "../services/provider-service.js";
 import { SessionEventService } from "../services/session-event-service.js";
 import { SessionService } from "../services/session-service.js";
@@ -199,6 +200,12 @@ export async function createServer(config: HarnessConfig = loadHarnessConfig()) 
   );
   providers.setAvailabilityObserver(() => dreamingWorker?.providersChanged());
   const localMemoryEmbedder = new LocalMemoryEmbedder(config.globalRoot);
+  const memoryRecorder = new MemoryRecorderService(
+    config.globalRoot,
+    database.dreaming,
+    database.memories,
+    localMemoryEmbedder,
+  );
   const memories = new MemoryService(
     database.memories,
     {
@@ -219,6 +226,7 @@ export async function createServer(config: HarnessConfig = loadHarnessConfig()) 
       database.sessions,
       eventStore,
     ),
+    memoryRecorder,
   );
   agents = new AgentManager(
     sessionEvents.handle,

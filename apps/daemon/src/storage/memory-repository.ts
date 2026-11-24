@@ -10,20 +10,12 @@ import {
   MemorySourceType,
   type StoredMemoryEmbedding,
   type StoredMemoryInput,
-  UserProfileFacet,
-  type UserProfileFacet as UserProfileFacetValue,
   type VisibleMemoryEmbedding,
 } from "@pi-harness/memory";
 import { recordGlobalMemoryVersion } from "./global-memory-version.js";
 
 interface MemoryRow {
   [key: string]: unknown;
-}
-
-const PROFILE_FACETS = new Set<string>(Object.values(UserProfileFacet));
-
-function isUserProfileFacet(value: string): value is UserProfileFacetValue {
-  return PROFILE_FACETS.has(value);
 }
 
 function requiredString(row: MemoryRow, key: string): string {
@@ -51,7 +43,6 @@ function requiredInteger(row: MemoryRow, key: string): number {
 function mapMemory(row: MemoryRow): MemoryRecord {
   const scope = requiredString(row, "scope");
   const sourceType = requiredString(row, "source_type");
-  const profileFacet = nullableString(row, "profile_facet");
   if (scope !== MemoryScope.USER && scope !== MemoryScope.WORKSPACE) {
     throw new Error("Invalid memory scope");
   }
@@ -61,17 +52,10 @@ function mapMemory(row: MemoryRow): MemoryRecord {
   if (requiredString(row, "status") !== "saved") {
     throw new Error("Invalid memory status");
   }
-  if (profileFacet !== null && !isUserProfileFacet(profileFacet)) {
-    throw new Error("Invalid memory profile facet");
-  }
-  if (scope === MemoryScope.WORKSPACE && profileFacet !== null) {
-    throw new Error("Invalid memory profile scope");
-  }
   return {
     content: requiredString(row, "content"),
     createdAt: requiredInteger(row, "created_at"),
     id: requiredString(row, "id"),
-    profileFacet,
     revision: requiredInteger(row, "revision"),
     scope,
     sourceSessionId: nullableString(row, "source_session_id"),
@@ -107,13 +91,12 @@ export class SqliteMemoryRepository implements MemoryRepository {
           `INSERT INTO memories (
              id, content, normalized_content, profile_facet, scope, workspace_id, status,
              source_type, source_session_id, revision, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, 'saved', ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, NULL, ?, ?, 'saved', ?, ?, ?, ?, ?)`,
         )
         .run(
           memory.id,
           memory.content,
           memory.normalizedContent,
-          memory.profileFacet,
           memory.scope,
           memory.workspaceId,
           memory.sourceType,
@@ -469,14 +452,13 @@ export class SqliteMemoryRepository implements MemoryRepository {
         this.database
           .prepare(
             `UPDATE memories SET
-               content = ?, normalized_content = ?, profile_facet = ?, scope = ?, workspace_id = ?,
+               content = ?, normalized_content = ?, profile_facet = NULL, scope = ?, workspace_id = ?,
                revision = ?, updated_at = ?
              WHERE id = ? AND revision = ?`,
           )
           .run(
             memory.content,
             memory.normalizedContent,
-            memory.profileFacet,
             memory.scope,
             memory.workspaceId,
             memory.revision,

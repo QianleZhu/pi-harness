@@ -1,5 +1,6 @@
 import {
   type CreateMemoryInput,
+  type CreateUserProfileInput,
   type DeleteMemoryInput,
   MemoryError,
   MemoryErrorCode,
@@ -10,6 +11,9 @@ import {
   type MemoryState,
   type UpdateMemoryInput,
   type UpdateMemorySettingsInput,
+  type UpdateUserProfileInput,
+  type UserProfileItem,
+  type UserProfileParams,
 } from "@pi-harness/memory";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { HarnessConfig } from "../config/index.js";
@@ -67,6 +71,43 @@ export class MemoryController {
     if (!isMutationRequestAllowed(this.config, request)) return rejectMutation(reply);
     try {
       await this.memories.delete(request.params.memoryId, request.body.expectedRevision);
+      return reply.status(204).send();
+    } catch (error: unknown) {
+      return this.sendError(request, reply, error);
+    }
+  };
+
+  public createProfile = async (
+    request: FastifyRequest<{ Body: CreateUserProfileInput }>,
+    reply: FastifyReply,
+  ): Promise<UserProfileItem | FastifyReply> => {
+    if (!isMutationRequestAllowed(this.config, request)) return rejectMutation(reply);
+    try {
+      return this.memories.createUserProfile(request.body);
+    } catch (error: unknown) {
+      return this.sendError(request, reply, error);
+    }
+  };
+
+  public updateProfile = async (
+    request: FastifyRequest<{ Body: UpdateUserProfileInput; Params: UserProfileParams }>,
+    reply: FastifyReply,
+  ): Promise<UserProfileItem | FastifyReply> => {
+    if (!isMutationRequestAllowed(this.config, request)) return rejectMutation(reply);
+    try {
+      return this.memories.updateUserProfile(request.params.profileId, request.body);
+    } catch (error: unknown) {
+      return this.sendError(request, reply, error);
+    }
+  };
+
+  public removeProfile = async (
+    request: FastifyRequest<{ Params: UserProfileParams }>,
+    reply: FastifyReply,
+  ): Promise<FastifyReply> => {
+    if (!isMutationRequestAllowed(this.config, request)) return rejectMutation(reply);
+    try {
+      this.memories.deleteUserProfile(request.params.profileId);
       return reply.status(204).send();
     } catch (error: unknown) {
       return this.sendError(request, reply, error);

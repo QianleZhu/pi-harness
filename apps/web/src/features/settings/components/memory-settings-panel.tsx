@@ -1,6 +1,6 @@
 "use client";
 
-import { FolderOpen, Gear, Person, Plus, TrashBin } from "@gravity-ui/icons";
+import { Gear, Globe, Person, Plus, TrashBin } from "@gravity-ui/icons";
 import {
   Alert,
   AlertDialog,
@@ -12,98 +12,124 @@ import {
   Tooltip,
   toast,
 } from "@heroui/react";
-import { type MemoryRecord, MemoryScope, MemorySourceType } from "@pi-harness/memory/contract";
+import {
+  type MemoryRecord,
+  MemorySourceType,
+  type UserProfileItem,
+} from "@pi-harness/memory/contract";
 import { useState } from "react";
 import { formatChatTimestamp } from "../../../shared/utils/format-chat-timestamp";
 import { getMemoryProfileFacetLabel } from "../constants/memory-profile";
 import { useMemories } from "../hooks/use-memories";
-import { MemoryEditorDialog } from "./memory-editor-dialog";
+import { MemoryEditorDialog, type MemoryEditorTarget } from "./memory-editor-dialog";
 import type { MemoryWorkspaceOption } from "./memory-scope-select";
 import { SettingsCatalogItem } from "./settings-catalog-item";
 import { SettingsFilterTabs } from "./settings-filter-tabs";
 import { SettingsPanelHeader } from "./settings-panel-header";
 
 const MemoryView = {
-  ALL: "all",
   PROFILE: "profile",
-  PROJECT: "project",
-  USER: "user",
+  GLOBAL: "global",
 } as const;
 const MEMORY_FILTERS = [
-  { id: MemoryView.ALL, label: "全部记忆" },
-  { id: MemoryView.PROFILE, label: "用户画像" },
-  { id: MemoryView.USER, label: "全局记忆" },
-  { id: MemoryView.PROJECT, label: "项目记忆" },
+  { id: MemoryView.PROFILE, label: "用户个性" },
+  { id: MemoryView.GLOBAL, label: "全局记忆" },
 ];
+
+type DeleteTarget =
+  | { kind: "global"; entry: MemoryRecord }
+  | { kind: "profile"; entry: UserProfileItem };
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "记忆操作失败";
 }
 
 export function MemorySettingsPanel({
-  workspaces,
+  workspaces: _workspaces,
 }: {
   workspaces: readonly MemoryWorkspaceOption[];
 }) {
   const memory = useMemories();
-  const [view, setView] = useState<string>(MemoryView.ALL);
+  const [view, setView] = useState<string>(MemoryView.PROFILE);
   const [search, setSearch] = useState("");
-  const [editor, setEditor] = useState<{ entry: MemoryRecord | null } | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<MemoryRecord | null>(null);
+  const [editor, setEditor] = useState<MemoryEditorTarget | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const memories = memory.query.data?.memories ?? [];
   const profile = memory.query.data?.profile;
   const settings = memory.query.data?.settings;
-  const workspaceNames = new Map(workspaces.map(({ id, name }) => [id, name]));
   const normalizedSearch = search.trim().toLocaleLowerCase();
-  const matchesSearch = (entry: MemoryRecord) => {
-    const scopeLabel =
-      entry.scope === MemoryScope.USER
-        ? "全局 所有项目"
-        : `项目 ${workspaceNames.get(entry.workspaceId ?? "") ?? "已移除项目"}`;
+
+  const matchesGlobalSearch = (entry: MemoryRecord) => {
     const source = entry.sourceType === MemorySourceType.MANUAL ? "手动添加" : "来自对话";
-    const facet = getMemoryProfileFacetLabel(entry.profileFacet) ?? "";
-    return `${entry.content} ${source} ${scopeLabel} ${facet}`
+    return `${entry.content} ${source} 全局 跨项目经验`
       .toLocaleLowerCase()
       .includes(normalizedSearch);
   };
+  const matchesProfileSearch = (item: UserProfileItem) => {
+    const facet = getMemoryProfileFacetLabel(item.facet) ?? "";
+    return `${item.content} ${facet} 用户个性`.toLocaleLowerCase().includes(normalizedSearch);
+  };
+
   const profileSections = (profile?.sections ?? [])
-    .map((section) => ({ ...section, memories: section.memories.filter(matchesSearch) }))
-    .filter(({ memories }) => memories.length > 0);
-  const visible =
+    .map((section) => ({ ...section, items: section.items.filter(matchesProfileSearch) }))
+    .filter(({ items }) => items.length > 0);
+  const visibleGlobal = memories.filter(matchesGlobalSearch);
+  const visibleCount =
     view === MemoryView.PROFILE
-      ? profileSections.flatMap(({ memories }) => memories)
-      : memories.filter(
-          (entry) =>
-            (view !== MemoryView.USER || entry.scope === MemoryScope.USER) &&
-            (view !== MemoryView.PROJECT || entry.scope === MemoryScope.WORKSPACE) &&
-            matchesSearch(entry),
-        );
+      ? profileSections.reduce((sum, section) => sum + section.items.length, 0)
+      : visibleGlobal.length;
 
   const refreshAfterError = (error: unknown) => {
     toast.danger(errorMessage(error));
     void memory.query.refetch();
   };
 
-  const renderMemory = (entry: MemoryRecord) => {
-    const scopeLabel =
-      entry.scope === MemoryScope.USER
-        ? "全局 · 所有项目"
-        : `项目 · ${workspaceNames.get(entry.workspaceId ?? "") ?? "已移除项目"}`;
-    const facetLabel =
-      getMemoryProfileFacetLabel(entry.profileFacet) ??
-      (entry.scope === MemoryScope.USER ? "跨项目经验" : null);
-    const Icon = entry.scope === MemoryScope.USER ? Person : FolderOpen;
+  const renderProfileItem = (item: UserProfileItem) => {
+    const facetLabel = getMemoryProfileFacetLabel(item.facet);
+    return (
+      <SettingsCatalogItem
+        key={item.id}
+        ariaLabel={`编辑用户个性：${item.content}`}
+        name={item.content}
+        icon={<Person aria-hidden className="size-5 text-muted" />}
+        onPress={() => setEditor({ kind: "profile", entry: item })}
+        secondary={
+          <span className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+            {facetLabel ? <span>{facetLabel}</span> : null}
+            <span>手动维护</span>
+            <span>{formatChatTimestamp(item.updatedAt)}</span>
+          </span>
+        }
+        action={
+          <Tooltip>
+            <Button
+              isIconOnly
+              size="sm"
+              variant="ghost"
+              className="text-muted data-[hovered]:text-danger"
+              aria-label={`删除用户个性：${item.content}`}
+              onPress={() => setDeleteTarget({ kind: "profile", entry: item })}
+            >
+              <TrashBin aria-hidden className="size-4" />
+            </Button>
+            <Tooltip.Content>删除用户个性</Tooltip.Content>
+          </Tooltip>
+        }
+      />
+    );
+  };
+
+  const renderGlobalMemory = (entry: MemoryRecord) => {
     return (
       <SettingsCatalogItem
         key={entry.id}
-        ariaLabel={`编辑记忆：${entry.content}`}
+        ariaLabel={`编辑全局记忆：${entry.content}`}
         name={entry.content}
-        icon={<Icon aria-hidden className="size-5 text-muted" />}
-        onPress={() => setEditor({ entry })}
+        icon={<Globe aria-hidden className="size-5 text-muted" />}
+        onPress={() => setEditor({ kind: "global", entry })}
         secondary={
           <span className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
-            <span>{scopeLabel}</span>
-            {facetLabel ? <span>{facetLabel}</span> : null}
+            <span>全局 · 跨项目经验</span>
             <span>{entry.sourceType === MemorySourceType.MANUAL ? "手动添加" : "来自对话"}</span>
             <span>{formatChatTimestamp(entry.updatedAt)}</span>
           </span>
@@ -115,12 +141,12 @@ export function MemorySettingsPanel({
               size="sm"
               variant="ghost"
               className="text-muted data-[hovered]:text-danger"
-              aria-label={`删除记忆：${entry.content}`}
-              onPress={() => setDeleteTarget(entry)}
+              aria-label={`删除全局记忆：${entry.content}`}
+              onPress={() => setDeleteTarget({ kind: "global", entry })}
             >
               <TrashBin aria-hidden className="size-4" />
             </Button>
-            <Tooltip.Content>删除记忆</Tooltip.Content>
+            <Tooltip.Content>删除全局记忆</Tooltip.Content>
           </Tooltip>
         }
       />
@@ -174,17 +200,17 @@ export function MemorySettingsPanel({
                     </div>
                     <div className="flex items-start gap-4">
                       <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium text-foreground">从对话中学习</p>
+                        <p className="text-sm font-medium text-foreground">生成记忆</p>
                         <p className="mt-1 text-xs text-muted">
-                          {settings?.generateMemories && settings.useMemories
-                            ? "自动保存可跨会话复用的稳定偏好和事实。"
-                            : "已暂停自动学习，现有记忆不受影响。"}
+                          {settings?.generateMemories
+                            ? "允许在对话中记录暂存记忆并由 Dreaming 后台整理。"
+                            : "已暂停生成记忆，正在进行的整理不受影响。"}
                         </p>
                       </div>
                       <Switch
-                        aria-label="从对话中学习"
+                        aria-label="生成记忆"
                         className="mt-0.5 shrink-0"
-                        isDisabled={!settings?.useMemories || memory.isSavingSettings}
+                        isDisabled={!settings || memory.isSavingSettings}
                         isSelected={settings?.generateMemories ?? false}
                         onChange={(generateMemories) => {
                           void memory.updateSettings({ generateMemories }).catch(refreshAfterError);
@@ -209,10 +235,15 @@ export function MemorySettingsPanel({
               size="sm"
               variant="secondary"
               isDisabled={memory.query.isPending}
-              onPress={() => setEditor({ entry: null })}
+              onPress={() =>
+                setEditor({
+                  kind: view === MemoryView.PROFILE ? "profile" : "global",
+                  entry: null,
+                })
+              }
             >
               <Plus aria-hidden className="size-4" />
-              添加记忆
+              {view === MemoryView.PROFILE ? "添加个性" : "添加全局记忆"}
             </Button>
           </div>
         }
@@ -252,8 +283,12 @@ export function MemorySettingsPanel({
           </SearchField>
         </div>
         {view === MemoryView.PROFILE ? (
-          <p className="px-3 text-xs text-muted">根据个人记忆自动分组。</p>
-        ) : null}
+          <p className="px-3 text-xs text-muted">用户个性仅通过手动输入更新和删除。</p>
+        ) : (
+          <p className="px-3 text-xs text-muted">
+            跨项目通用经验，工作区项目记忆由 Dreaming 自动维护。
+          </p>
+        )}
         {memory.query.isPending ? (
           <div aria-busy="true" className="flex flex-col gap-1" role="status">
             <span className="sr-only">正在加载记忆</span>
@@ -277,21 +312,21 @@ export function MemorySettingsPanel({
                 >
                   {getMemoryProfileFacetLabel(section.facet)}
                 </h3>
-                <ul className="flex flex-col gap-1">{section.memories.map(renderMemory)}</ul>
+                <ul className="flex flex-col gap-1">{section.items.map(renderProfileItem)}</ul>
               </section>
             ))}
           </div>
         ) : (
-          <ul className="flex flex-col gap-1">{visible.map(renderMemory)}</ul>
+          <ul className="flex flex-col gap-1">{visibleGlobal.map(renderGlobalMemory)}</ul>
         )}
-        {!memory.query.isPending && !visible.length ? (
+        {!memory.query.isPending && visibleCount === 0 ? (
           <div className="py-8 text-center" role="status">
             <p className="text-sm text-muted">
               {search
-                ? "没有找到匹配的记忆"
+                ? "没有找到匹配的记录"
                 : view === MemoryView.PROFILE
-                  ? "暂无用户画像"
-                  : "暂无记忆"}
+                  ? "暂无用户个性"
+                  : "暂无全局记忆"}
             </p>
             {search ? (
               <Button className="mt-3" size="sm" variant="tertiary" onPress={() => setSearch("")}>
@@ -303,26 +338,39 @@ export function MemorySettingsPanel({
       </div>
       {editor ? (
         <MemoryEditorDialog
-          entry={editor.entry}
-          isSaving={memory.isCreating || memory.isUpdating === editor.entry?.id}
+          target={editor}
+          isSaving={
+            memory.isCreating || (editor.entry !== null && memory.isUpdating === editor.entry.id)
+          }
           onClose={() => setEditor(null)}
-          onSave={async (input) => {
+          onSave={async (payload) => {
             try {
-              if (editor.entry) {
+              if (payload.kind === "profile") {
+                if (editor.kind === "profile" && editor.entry) {
+                  await memory.updateProfile(editor.entry.id, {
+                    content: payload.content,
+                    facet: payload.facet,
+                  });
+                } else {
+                  await memory.createProfile({
+                    content: payload.content,
+                    facet: payload.facet,
+                  });
+                }
+              } else if (editor.kind === "global" && editor.entry) {
                 await memory.update(editor.entry.id, {
-                  ...input,
+                  content: payload.content,
                   expectedRevision: editor.entry.revision,
                 });
               } else {
-                await memory.create(input);
+                await memory.create({ content: payload.content });
               }
               setEditor(null);
-              toast.success("记忆已保存");
+              toast.success("已保存");
             } catch (error: unknown) {
               refreshAfterError(error);
             }
           }}
-          workspaces={workspaces}
         />
       ) : null}
       <AlertDialog.Backdrop
@@ -335,10 +383,12 @@ export function MemorySettingsPanel({
           <AlertDialog.Dialog className="sm:max-w-[420px]">
             <AlertDialog.Header>
               <AlertDialog.Icon status="warning" />
-              <AlertDialog.Heading>删除这条记忆？</AlertDialog.Heading>
+              <AlertDialog.Heading>
+                {deleteTarget?.kind === "profile" ? "删除这条用户个性？" : "删除这条全局记忆？"}
+              </AlertDialog.Heading>
             </AlertDialog.Header>
             <AlertDialog.Body>
-              <p className="break-words">{deleteTarget?.content}</p>
+              <p className="break-words">{deleteTarget?.entry.content}</p>
               <p className="mt-3 text-sm text-muted">删除后，此内容将从记忆库中移除。</p>
             </AlertDialog.Body>
             <AlertDialog.Footer>
@@ -351,11 +401,14 @@ export function MemorySettingsPanel({
               </Button>
               <Button
                 variant="danger"
-                isPending={memory.isDeleting === deleteTarget?.id}
+                isPending={deleteTarget !== null && memory.isDeleting === deleteTarget.entry.id}
                 onPress={() => {
                   if (!deleteTarget) return;
-                  void memory
-                    .remove(deleteTarget.id, deleteTarget.revision)
+                  const task =
+                    deleteTarget.kind === "profile"
+                      ? memory.removeProfile(deleteTarget.entry.id)
+                      : memory.remove(deleteTarget.entry.id, deleteTarget.entry.revision);
+                  void task
                     .then(() => {
                       setDeleteTarget(null);
                       toast.success("已移除");

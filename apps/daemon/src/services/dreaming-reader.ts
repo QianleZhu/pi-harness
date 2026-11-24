@@ -11,10 +11,11 @@ import type { SessionRepository } from "../storage/database.js";
 import type { SqliteDreamingRepository } from "../storage/dreaming-repository.js";
 import type { SqliteMemoryRepository } from "../storage/memory-repository.js";
 import type { SessionEventStore } from "../storage/session-event-store.js";
+import type { SqliteUserProfileRepository } from "../storage/user-profile-repository.js";
 import { textData } from "../utils/dreaming-events.js";
 import { contextDirectory, ID_PATTERN, readContextFile } from "../utils/dreaming-wiki.js";
 
-// 从固定发布版本及其引用中读取工作区和全局记忆。
+// 从固定发布版本及其引用中读取用户个性、工作区和全局记忆。
 export class DreamingReaderService implements DreamingReader {
   public constructor(
     private readonly root: string,
@@ -22,6 +23,7 @@ export class DreamingReaderService implements DreamingReader {
     private readonly memories: SqliteMemoryRepository,
     private readonly sessions: SessionRepository,
     private readonly events: SessionEventStore,
+    private readonly userProfiles?: SqliteUserProfileRepository,
   ) {}
 
   // 固定 Run 启动时的 Wiki、可见记忆版本与本 Session 待审暂存记录。
@@ -61,6 +63,13 @@ export class DreamingReaderService implements DreamingReader {
         return `- ${memory.content}${applicability ? `（适用条件：${applicability}）` : ""}${uncertain} [memory:${memory.id}@${memory.revision}]`;
       })
       .join("\n");
+  }
+
+  // 读取固定快照中的独立用户个性条目，按维度标注全量注入。
+  public readUserProfileContext(snapshot?: RunMemorySnapshot): string | null {
+    const items = snapshot ? (snapshot.userProfiles ?? []) : (this.userProfiles?.list() ?? []);
+    if (!items.length) return null;
+    return items.map((item) => `- [${item.facet}] ${item.content}`).join("\n");
   }
 
   // 读取数据库指向的工作区 Wiki 文件。

@@ -1,4 +1,3 @@
-import type { UserProfileFacet } from "./contract.js";
 import type { MemoryEmbedding } from "./memory-service.js";
 
 // Dreaming 保存的记忆版本及其证据状态。
@@ -47,10 +46,8 @@ export interface DreamingMemoryChange {
   embedding?: MemoryEmbedding | null;
 }
 
-// 全局整理草案的画像分类为空时表示跨项目经验。
-export interface GlobalDreamingMemoryChange extends DreamingMemoryChange {
-  profileFacet: UserProfileFacet | null;
-}
+// 全局整理草案仅维护跨项目经验，不涉及用户个性。
+export type GlobalDreamingMemoryChange = DreamingMemoryChange;
 
 // Wiki 草案只接受单层 Markdown 文件名。
 export const DREAMING_WIKI_NAME_PATTERN = /^(?:index|context|[a-z0-9][a-z0-9_-]{0,63})\.md$/;

@@ -24,6 +24,7 @@ import { SqliteDreamingRepository } from "./dreaming-repository.js";
 import { type McpServerRepository, SqliteMcpServerRepository } from "./mcp-server-repository.js";
 import { SqliteMemoryRepository } from "./memory-repository.js";
 import { DATABASE_MIGRATIONS } from "./migrations.js";
+import { SqliteUserProfileRepository } from "./user-profile-repository.js";
 
 export interface AuthUser {
   id: string;
@@ -1142,6 +1143,7 @@ export interface HarnessDatabase {
   boardTasks: BoardTaskRepository;
   mcpServers: McpServerRepository;
   memories: SqliteMemoryRepository;
+  userProfiles: SqliteUserProfileRepository;
   appSettings: AppSettingRepository;
   authSessions: AuthSessionRepository;
   close(): void;
@@ -1165,6 +1167,7 @@ export function openHarnessDatabase(databasePath: string): HarnessDatabase {
     boardTasks: new SqliteBoardTaskRepository(database),
     mcpServers: new SqliteMcpServerRepository(database),
     memories: new SqliteMemoryRepository(database),
+    userProfiles: new SqliteUserProfileRepository(database),
     appSettings: new SqliteAppSettingRepository(database),
     authSessions: new SqliteAuthSessionRepository(database),
     close: () => database.close(),

@@ -220,8 +220,10 @@ export async function createServer(config: HarnessConfig = loadHarnessConfig()) 
       database.memories,
       database.sessions,
       eventStore,
+      database.userProfiles,
     ),
     memoryRecorder,
+    database.userProfiles,
   );
   agents = new AgentManager(
     sessionEvents.handle,

@@ -1,13 +1,24 @@
 import type {
   CreateMemoryInput,
+  CreateUserProfileInput,
   MemoryRecord,
   MemorySettings,
   MemoryState,
   UpdateMemoryInput,
   UpdateMemorySettingsInput,
+  UpdateUserProfileInput,
+  UserProfileItem,
 } from "@pi-harness/memory/contract";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createMemory, deleteMemory, updateMemory, updateMemorySettings } from "../api/memory-api";
+import {
+  createMemory,
+  createUserProfile,
+  deleteMemory,
+  deleteUserProfile,
+  updateMemory,
+  updateMemorySettings,
+  updateUserProfile,
+} from "../api/memory-api";
 import { memoryQueryKeys, memoryQueryOptions } from "../api/memory-queries";
 
 export function useMemories() {
@@ -29,6 +40,22 @@ export function useMemories() {
     mutationFn: ({ expectedRevision, memoryId }) => deleteMemory(memoryId, expectedRevision),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: memoryQueryKeys.all }),
   });
+  const createProfileMutation = useMutation({
+    mutationFn: createUserProfile,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: memoryQueryKeys.all }),
+  });
+  const updateProfileMutation = useMutation<
+    UserProfileItem,
+    Error,
+    { input: UpdateUserProfileInput; profileId: string }
+  >({
+    mutationFn: ({ input, profileId }) => updateUserProfile(profileId, input),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: memoryQueryKeys.all }),
+  });
+  const deleteProfileMutation = useMutation<void, Error, string>({
+    mutationFn: deleteUserProfile,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: memoryQueryKeys.all }),
+  });
   const settingsMutation = useMutation<MemorySettings, Error, UpdateMemorySettingsInput>({
     mutationFn: updateMemorySettings,
     onSuccess: (settings) => {
@@ -40,15 +67,23 @@ export function useMemories() {
 
   return {
     create: (input: CreateMemoryInput) => createMutation.mutateAsync(input),
-    isCreating: createMutation.isPending,
-    isDeleting: deleteMutation.isPending ? deleteMutation.variables?.memoryId : null,
+    createProfile: (input: CreateUserProfileInput) => createProfileMutation.mutateAsync(input),
+    isCreating: createMutation.isPending || createProfileMutation.isPending,
+    isDeleting:
+      (deleteMutation.isPending ? deleteMutation.variables?.memoryId : null) ??
+      (deleteProfileMutation.isPending ? deleteProfileMutation.variables : null),
     isSavingSettings: settingsMutation.isPending,
-    isUpdating: updateMutation.isPending ? updateMutation.variables?.memoryId : null,
+    isUpdating:
+      (updateMutation.isPending ? updateMutation.variables?.memoryId : null) ??
+      (updateProfileMutation.isPending ? updateProfileMutation.variables?.profileId : null),
     query,
     remove: (memoryId: string, expectedRevision: number) =>
       deleteMutation.mutateAsync({ expectedRevision, memoryId }),
+    removeProfile: (profileId: string) => deleteProfileMutation.mutateAsync(profileId),
     update: (memoryId: string, input: UpdateMemoryInput) =>
       updateMutation.mutateAsync({ input, memoryId }),
+    updateProfile: (profileId: string, input: UpdateUserProfileInput) =>
+      updateProfileMutation.mutateAsync({ input, profileId }),
     updateSettings: settingsMutation.mutateAsync,
   };
 }

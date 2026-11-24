@@ -11,6 +11,8 @@ import {
   type RunMemorySnapshot,
   DreamingRunStatus as RunStatus,
   resolveDreamingRevision,
+  type UserProfileItem,
+  UserProfileItemSchema,
 } from "@pi-harness/memory";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
@@ -105,7 +107,7 @@ export class SqliteDreamingRepository {
       const global = this.getGlobalVersion();
       const workspaceRow = this.database
         .prepare(`SELECT COALESCE(json_group_array(json_object(
-        'id', id, 'content', content, 'profileFacet', profile_facet, 'scope', scope,
+        'id', id, 'content', content, 'scope', scope,
         'workspaceId', workspace_id, 'sourceType', source_type, 'sourceSessionId', source_session_id,
         'revision', revision, 'createdAt', created_at, 'updatedAt', updated_at)), '[]') AS memories_json
         FROM memories WHERE scope = 'workspace' AND workspace_id = ? AND status = 'saved'`)
@@ -115,6 +117,17 @@ export class SqliteDreamingRepository {
       const workspaceMemories: unknown = JSON.parse(workspaceRow.memories_json);
       if (!Value.Check(Type.Array(MemoryRecordSchema), workspaceMemories))
         throw new Error("Invalid workspace snapshot");
+      const profileRow = this.database
+        .prepare(`SELECT COALESCE(json_group_array(json_object(
+        'id', id, 'facet', facet, 'content', content,
+        'createdAt', created_at, 'updatedAt', updated_at)), '[]') AS profiles_json
+        FROM (SELECT * FROM user_profiles ORDER BY updated_at DESC, id)`)
+        .get();
+      if (!profileRow || typeof profileRow.profiles_json !== "string")
+        throw new Error("Invalid user profile snapshot");
+      const userProfiles: unknown = JSON.parse(profileRow.profiles_json);
+      if (!Value.Check(Type.Array(UserProfileItemSchema), userProfiles))
+        throw new Error("Invalid user profile snapshot");
       const provisionalMemories = sessionId
         ? this.listSessionPendingProvisionalMemories(workspaceId, sessionId)
         : [];
@@ -131,6 +144,7 @@ export class SqliteDreamingRepository {
         globalMemories: global.memories,
         workspaceMemories: workspaceMemories as import("@pi-harness/memory").MemoryRecord[],
         provisionalMemories,
+        userProfiles: userProfiles as UserProfileItem[],
       };
     } catch (error: unknown) {
       this.database.exec("ROLLBACK");
@@ -261,12 +275,11 @@ export class SqliteDreamingRepository {
           this.database
             .prepare(`INSERT INTO memories
             (id, content, normalized_content, profile_facet, scope, workspace_id, status, source_type, source_session_id, revision, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 'user', NULL, 'saved', 'session', ?, 1, ?, ?)`)
+            VALUES (?, ?, ?, NULL, 'user', NULL, 'saved', 'session', ?, 1, ?, ?)`)
             .run(
               change.memoryId,
               content,
               content.toLocaleLowerCase(),
-              change.profileFacet,
               change.sources[0]?.sessionId ?? null,
               input.now,
               input.now,
@@ -299,21 +312,12 @@ export class SqliteDreamingRepository {
             this.findRevision(change.memoryId, change.expectedRevision),
             this.listSources(change.memoryId, change.expectedRevision),
           );
-          if (revision === change.expectedRevision && current.profile_facet !== change.profileFacet)
-            revision++;
           if (revision === change.expectedRevision) continue;
           this.database
             .prepare(
-              "UPDATE memories SET content = ?, normalized_content = ?, profile_facet = ?, revision = ?, updated_at = ? WHERE id = ?",
+              "UPDATE memories SET content = ?, normalized_content = ?, profile_facet = NULL, revision = ?, updated_at = ? WHERE id = ?",
             )
-            .run(
-              content,
-              content.toLocaleLowerCase(),
-              change.profileFacet,
-              revision,
-              input.now,
-              change.memoryId,
-            );
+            .run(content, content.toLocaleLowerCase(), revision, input.now, change.memoryId);
           this.database
             .prepare("DELETE FROM memory_search WHERE memory_id = ?")
             .run(change.memoryId);

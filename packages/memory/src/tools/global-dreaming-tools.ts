@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
-import { type MemoryRecord, UserProfileFacetSchema } from "../contract.js";
+import type { MemoryRecord } from "../contract.js";
 import {
   type GlobalDreamingCandidate,
   type GlobalDreamingMemoryChange,
@@ -18,7 +18,6 @@ const DraftSchema = Type.Object({
   evidenceStatus: Type.Union(
     Object.values(MemoryEvidenceStatus).map((value) => Type.Literal(value)),
   ),
-  profileFacet: Type.Union([UserProfileFacetSchema, Type.Null()]),
   candidateIndexes: Type.Array(Type.Integer({ minimum: 0 }), { minItems: 1, maxItems: 30 }),
 });
 const InspectSchema = Type.Object({
@@ -77,7 +76,7 @@ export function createGlobalDreamingTools(options: {
       name: "draft_global_memory",
       label: "Draft global memory",
       description:
-        "Create or update user memory, citing candidate indexes; profileFacet=null denotes cross-project experience.",
+        "Create or update a cross-project global memory, citing candidate indexes. Do not store personal user profile items here.",
       executionMode: "sequential",
       parameters: DraftSchema,
       async execute(_id, value) {
@@ -107,7 +106,6 @@ export function createGlobalDreamingTools(options: {
           content: args.content,
           applicability: args.applicability,
           evidenceStatus: args.evidenceStatus,
-          profileFacet: args.profileFacet,
           sources,
         });
         const result = { memoryId };

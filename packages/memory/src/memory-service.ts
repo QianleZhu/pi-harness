@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   type CreateMemoryInput,
+  type CreateUserProfileInput,
   type MemoryRecord,
   MemoryScope,
   type MemoryScope as MemoryScopeValue,
@@ -10,9 +11,10 @@ import {
   MemorySourceType as SourceType,
   type UpdateMemoryInput,
   type UpdateMemorySettingsInput,
+  type UpdateUserProfileInput,
   type UserProfile,
   UserProfileFacet,
-  type UserProfileFacet as UserProfileFacetValue,
+  type UserProfileItem,
 } from "./contract.js";
 import type { ProvisionalMemory, RecordedMemory, RecordMemoryInput } from "./dreaming.js";
 import { buildMemoryContextPrompt } from "./prompts/memory-context-prompt.js";
@@ -44,6 +46,19 @@ export class MemoryError extends Error {
 
 export interface StoredMemoryInput extends MemoryRecord {
   normalizedContent: string;
+}
+
+export interface StoredUserProfileInput extends UserProfileItem {
+  normalizedContent: string;
+}
+
+export interface UserProfileRepository {
+  create(item: StoredUserProfileInput): void;
+  delete(profileId: string): boolean;
+  find(profileId: string): UserProfileItem | null;
+  findDuplicate(normalizedContent: string, excludeId?: string): UserProfileItem | null;
+  list(): readonly UserProfileItem[];
+  update(item: StoredUserProfileInput): boolean;
 }
 
 export interface MemoryEmbedding {
@@ -114,7 +129,7 @@ export interface MemoryRepository {
   updateSettings(settings: MemorySettings, updatedAt: number): void;
 }
 
-// Run 固定开关、上下文、Wiki 版本、每条可见记忆版本以及本 Session 待审暂存记录。
+// Run 固定开关、用户个性、上下文、Wiki 版本、每条可见记忆版本以及本 Session 待审暂存记录。
 export interface RunMemorySnapshot {
   workspaceId: string;
   sessionId?: string;
@@ -128,6 +143,7 @@ export interface RunMemorySnapshot {
   globalMemories?: readonly MemoryRecord[];
   workspaceMemories?: readonly MemoryRecord[];
   provisionalMemories?: readonly ProvisionalMemory[];
+  userProfiles?: readonly UserProfileItem[];
 }
 
 // 主 Agent 读取已发布的 Dreaming 内容，具体存储由 daemon 提供。
@@ -135,6 +151,7 @@ export interface DreamingReader {
   captureSnapshot(workspaceId: string, sessionId?: string): RunMemorySnapshot;
   readContext(workspaceId: string, snapshot?: RunMemorySnapshot): Promise<string | null>;
   readGlobalContext(snapshot?: RunMemorySnapshot): string | null;
+  readUserProfileContext(snapshot?: RunMemorySnapshot): string | null;
   readWiki(
     workspaceId: string,
     name: string,
@@ -220,39 +237,14 @@ function normalizeContent(content: string): { content: string; normalized: strin
   return { content: trimmed, normalized: trimmed.toLocaleLowerCase() };
 }
 
-function normalizeScope(
-  scope: MemoryScopeValue,
-  workspaceId: string | null,
-): { scope: MemoryScopeValue; workspaceId: string | null } {
-  if (scope === MemoryScope.USER) return { scope, workspaceId: null };
-  if (!workspaceId) {
-    throw new MemoryError(MemoryErrorCode.INVALID, "项目记忆必须指定 Workspace");
-  }
-  return { scope, workspaceId };
-}
-
-function normalizeProfileFacet(
-  scope: MemoryScopeValue,
-  profileFacet: UserProfileFacetValue | null | undefined,
-): UserProfileFacetValue | null {
-  return scope === MemoryScope.USER
-    ? profileFacet === undefined
-      ? UserProfileFacet.PREFERENCES
-      : profileFacet
-    : null;
-}
-
-export function buildUserProfile(memories: readonly MemoryRecord[]): UserProfile {
-  const personal = memories.filter(
-    (memory) => memory.scope === MemoryScope.USER && memory.profileFacet !== null,
-  );
+export function buildUserProfile(items: readonly UserProfileItem[]): UserProfile {
   return {
     sections: PROFILE_FACETS.map((facet) => ({
       facet,
-      memories: personal.filter((memory) => memory.profileFacet === facet),
+      items: items.filter((item) => item.facet === facet),
     })),
-    updatedAt: personal.reduce<number | null>(
-      (latest, memory) => (latest === null ? memory.updatedAt : Math.max(latest, memory.updatedAt)),
+    updatedAt: items.reduce<number | null>(
+      (latest, item) => (latest === null ? item.updatedAt : Math.max(latest, item.updatedAt)),
       null,
     ),
   };
@@ -266,9 +258,10 @@ export class MemoryService implements MemoryRuntime {
     private readonly embedder: MemoryEmbedder,
     private readonly dreaming?: DreamingReader,
     private readonly recorder?: MemoryRecorder,
+    private readonly userProfiles?: UserProfileRepository,
   ) {}
 
-  // 为主 Run 固定开关状态、记忆、Wiki 发布版本及本 Session 的待审暂存记录；运行中途切换开关不影响本次 Run。
+  // 为主 Run 固定开关状态、用户个性、记忆、Wiki 发布版本及本 Session 的待审暂存记录；运行中途切换开关不影响本次 Run。
   public captureSnapshot(workspaceId: string, sessionId?: string): RunMemorySnapshot | null {
     const settings = this.repository.getSettings();
     if (!settings.useMemories || !this.dreaming)
@@ -284,6 +277,7 @@ export class MemoryService implements MemoryRuntime {
         globalMemories: [],
         workspaceMemories: [],
         provisionalMemories: [],
+        userProfiles: [],
       };
     return {
       ...this.dreaming.captureSnapshot(workspaceId, sessionId),
@@ -359,11 +353,15 @@ export class MemoryService implements MemoryRuntime {
       throw new MemoryError(MemoryErrorCode.LEARNING_DISABLED, "已关闭生成记忆");
   }
 
+  // Web 设置页只查看跨项目全局记忆和独立用户个性，不暴露工作区记忆。
   public getState(): MemoryState {
-    const memories = [...this.repository.list()];
+    const globalMemories = this.repository
+      .list()
+      .filter((memory) => memory.scope === MemoryScope.USER);
+    const profiles = this.userProfiles?.list() ?? [];
     return {
-      memories,
-      profile: buildUserProfile(memories),
+      memories: globalMemories,
+      profile: buildUserProfile(profiles),
       settings: this.repository.getSettings(),
     };
   }
@@ -372,13 +370,84 @@ export class MemoryService implements MemoryRuntime {
     return this.repository.getSettings();
   }
 
+  // 用户个性仅通过独立表同步维护，不涉及全局记忆版本或 Dreaming 并发。
+  public listUserProfiles(): readonly UserProfileItem[] {
+    return this.userProfiles?.list() ?? [];
+  }
+
+  public createUserProfile(input: CreateUserProfileInput): UserProfileItem {
+    if (!this.userProfiles)
+      throw new MemoryError(MemoryErrorCode.INVALID, "当前运行未配置用户个性存储");
+    const content = normalizeContent(input.content);
+    if (this.userProfiles.findDuplicate(content.normalized)) {
+      throw new MemoryError(MemoryErrorCode.DUPLICATE, "已有相同的用户个性记录");
+    }
+    const now = Date.now();
+    const item: StoredUserProfileInput = {
+      id: randomUUID(),
+      facet: input.facet,
+      content: content.content,
+      normalizedContent: content.normalized,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.userProfiles.create(item);
+    return {
+      id: item.id,
+      facet: item.facet,
+      content: item.content,
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+    };
+  }
+
+  public updateUserProfile(profileId: string, input: UpdateUserProfileInput): UserProfileItem {
+    if (!this.userProfiles)
+      throw new MemoryError(MemoryErrorCode.INVALID, "当前运行未配置用户个性存储");
+    const current = this.userProfiles.find(profileId);
+    if (!current) throw new MemoryError(MemoryErrorCode.NOT_FOUND, "用户个性记录不存在");
+    const content = normalizeContent(input.content ?? current.content);
+    const facet = input.facet ?? current.facet;
+    if (this.userProfiles.findDuplicate(content.normalized, profileId)) {
+      throw new MemoryError(MemoryErrorCode.DUPLICATE, "已有相同的用户个性记录");
+    }
+    const updated: StoredUserProfileInput = {
+      ...current,
+      content: content.content,
+      normalizedContent: content.normalized,
+      facet,
+      updatedAt: Date.now(),
+    };
+    if (!this.userProfiles.update(updated)) {
+      throw new MemoryError(MemoryErrorCode.NOT_FOUND, "用户个性记录不存在");
+    }
+    return {
+      id: updated.id,
+      facet: updated.facet,
+      content: updated.content,
+      createdAt: updated.createdAt,
+      updatedAt: updated.updatedAt,
+    };
+  }
+
+  public deleteUserProfile(profileId: string): void {
+    if (!this.userProfiles)
+      throw new MemoryError(MemoryErrorCode.INVALID, "当前运行未配置用户个性存储");
+    if (!this.userProfiles.delete(profileId)) {
+      throw new MemoryError(MemoryErrorCode.NOT_FOUND, "用户个性记录不存在");
+    }
+  }
+
+  // Web API 手动创建的记忆固定为跨项目全局记忆（scope='user'）。
   public createManual(input: CreateMemoryInput, signal?: AbortSignal): Promise<MemoryRecord> {
     return this.withMutation(() =>
       this.create(
         {
-          ...input,
+          content: input.content,
+          scope: MemoryScope.USER,
           sourceSessionId: null,
           sourceType: SourceType.MANUAL,
+          workspaceId: null,
         },
         signal,
       ),
@@ -400,35 +469,31 @@ export class MemoryService implements MemoryRuntime {
   ): Promise<MemoryRecord> {
     const current = this.repository.find(memoryId);
     if (!current) throw new MemoryError(MemoryErrorCode.NOT_FOUND, "记忆不存在");
+    if (current.scope !== MemoryScope.USER) {
+      throw new MemoryError(
+        MemoryErrorCode.INVALID,
+        "工作区记忆仅由 Dreaming 自动维护，不支持手动修改",
+      );
+    }
     if (current.revision !== input.expectedRevision) {
       throw new MemoryError(MemoryErrorCode.CONFLICT, "记忆已发生变化，请刷新后重试");
     }
-    const content = normalizeContent(input.content ?? current.content);
-    const scope = normalizeScope(
-      input.scope ?? current.scope,
-      input.workspaceId === undefined ? current.workspaceId : input.workspaceId,
-    );
-    const profileFacet = normalizeProfileFacet(
-      scope.scope,
-      input.profileFacet === undefined ? current.profileFacet : input.profileFacet,
-    );
-    this.assertWorkspace(scope.workspaceId);
+    const content = normalizeContent(input.content);
     const duplicate = this.repository.findDuplicate(
       content.normalized,
-      scope.scope,
-      scope.workspaceId,
+      MemoryScope.USER,
+      null,
       memoryId,
     );
-    if (duplicate) throw new MemoryError(MemoryErrorCode.DUPLICATE, "已有相同作用范围的记忆");
+    if (duplicate) throw new MemoryError(MemoryErrorCode.DUPLICATE, "已有相同的全局记忆");
     const updated: StoredMemoryInput = {
       ...current,
       content: content.content,
       normalizedContent: content.normalized,
-      profileFacet,
       revision: current.revision + 1,
-      scope: scope.scope,
+      scope: MemoryScope.USER,
       updatedAt: Date.now(),
-      workspaceId: scope.workspaceId,
+      workspaceId: null,
     };
     const embedding =
       updated.content === current.content
@@ -456,6 +521,12 @@ export class MemoryService implements MemoryRuntime {
   private deleteUnlocked(memoryId: string, expectedRevision: number): void {
     const current = this.repository.find(memoryId);
     if (!current) throw new MemoryError(MemoryErrorCode.NOT_FOUND, "记忆不存在");
+    if (current.scope !== MemoryScope.USER) {
+      throw new MemoryError(
+        MemoryErrorCode.INVALID,
+        "工作区记忆仅由 Dreaming 自动维护，不支持手动删除",
+      );
+    }
     if (
       current.revision !== expectedRevision ||
       !this.repository.delete(memoryId, expectedRevision)
@@ -571,7 +642,7 @@ export class MemoryService implements MemoryRuntime {
     }
   }
 
-  // 使用 Run 固定的开关、上下文版本及本 Session 暂存记录在内存中拼装，不写入磁盘 context.md。
+  // 使用 Run 固定的开关、用户个性、上下文版本及本 Session 暂存记录在内存中拼装，不写入磁盘 context.md。
   public async buildContext(
     workspaceId: string,
     _signal?: AbortSignal,
@@ -587,6 +658,10 @@ export class MemoryService implements MemoryRuntime {
       settings.useMemories && this.dreaming
         ? this.dreaming.readGlobalContext(snapshot ?? undefined)
         : null;
+    const userProfileContext =
+      settings.useMemories && this.dreaming
+        ? this.dreaming.readUserProfileContext(snapshot ?? undefined)
+        : null;
     const provisionalContext = settings.useMemories
       ? formatProvisionalMemoriesContext(snapshot?.provisionalMemories ?? []).text
       : null;
@@ -595,13 +670,13 @@ export class MemoryService implements MemoryRuntime {
       settings.useMemories ? context : null,
       settings.useMemories ? globalContext : null,
       provisionalContext,
+      userProfileContext,
     );
   }
 
   private async create(
     input: {
       content: string;
-      profileFacet?: UserProfileFacetValue | null;
       scope: MemoryScopeValue;
       sourceSessionId: string | null;
       sourceType: MemorySourceType;
@@ -610,9 +685,12 @@ export class MemoryService implements MemoryRuntime {
     signal?: AbortSignal,
   ): Promise<MemoryRecord> {
     const content = normalizeContent(input.content);
-    const scope = normalizeScope(input.scope, input.workspaceId);
-    this.assertWorkspace(scope.workspaceId);
-    if (this.repository.findDuplicate(content.normalized, scope.scope, scope.workspaceId)) {
+    const workspaceId = input.scope === MemoryScope.USER ? null : input.workspaceId;
+    if (input.scope === MemoryScope.WORKSPACE && !workspaceId) {
+      throw new MemoryError(MemoryErrorCode.INVALID, "项目记忆必须指定 Workspace");
+    }
+    this.assertWorkspace(workspaceId);
+    if (this.repository.findDuplicate(content.normalized, input.scope, workspaceId)) {
       throw new MemoryError(MemoryErrorCode.DUPLICATE, "已有相同作用范围的记忆");
     }
     const createdAt = Date.now();
@@ -621,13 +699,12 @@ export class MemoryService implements MemoryRuntime {
       createdAt,
       id: randomUUID(),
       normalizedContent: content.normalized,
-      profileFacet: normalizeProfileFacet(scope.scope, input.profileFacet),
       revision: 1,
-      scope: scope.scope,
+      scope: input.scope,
       sourceSessionId: input.sourceSessionId,
       sourceType: input.sourceType,
       updatedAt: createdAt,
-      workspaceId: scope.workspaceId,
+      workspaceId,
     };
     const embedding = await this.tryEmbedMemory(memory.content, signal);
     this.repository.create(memory, embedding);

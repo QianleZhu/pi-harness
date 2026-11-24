@@ -747,4 +747,40 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
         ON provisional_memories(workspace_id, created_at);
     `,
   },
+  {
+    version: "033-user-profiles.sql",
+    sql: `
+      CREATE TABLE user_profiles (
+        id TEXT PRIMARY KEY,
+        facet TEXT NOT NULL CHECK (facet IN (
+          'background', 'communication', 'expertise', 'interests', 'preferences', 'workflow'
+        )),
+        content TEXT NOT NULL,
+        normalized_content TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX user_profiles_facet_updated_idx ON user_profiles(facet, updated_at DESC);
+
+      INSERT OR IGNORE INTO user_profiles (id, facet, content, normalized_content, created_at, updated_at)
+      SELECT id, profile_facet, content, normalized_content, created_at, updated_at
+      FROM memories
+      WHERE scope = 'user' AND profile_facet IS NOT NULL AND status = 'saved';
+
+      DELETE FROM memory_search
+      WHERE memory_id IN (SELECT id FROM memories WHERE scope = 'user' AND profile_facet IS NOT NULL);
+
+      DELETE FROM memories WHERE scope = 'user' AND profile_facet IS NOT NULL;
+
+      INSERT INTO global_memory_versions (version, memories_json, created_at)
+      SELECT (SELECT COALESCE(MAX(version), 0) + 1 FROM global_memory_versions),
+        COALESCE(json_group_array(json_object(
+          'id', id, 'content', content, 'scope', scope, 'workspaceId', workspace_id,
+          'sourceType', source_type, 'sourceSessionId', source_session_id,
+          'revision', revision, 'createdAt', created_at, 'updatedAt', updated_at
+        )), '[]'),
+        CAST(strftime('%s', 'now') AS INTEGER) * 1000
+      FROM memories WHERE scope = 'user' AND status = 'saved';
+    `,
+  },
 ];

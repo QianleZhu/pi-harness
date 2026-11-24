@@ -1,6 +1,8 @@
 import {
   type CreateMemoryInput,
   CreateMemoryInputSchema,
+  type CreateUserProfileInput,
+  CreateUserProfileInputSchema,
   type DeleteMemoryInput,
   DeleteMemoryInputSchema,
   type MemoryParams,
@@ -13,6 +15,11 @@ import {
   UpdateMemoryInputSchema,
   type UpdateMemorySettingsInput,
   UpdateMemorySettingsInputSchema,
+  type UpdateUserProfileInput,
+  UpdateUserProfileInputSchema,
+  UserProfileItemSchema,
+  type UserProfileParams,
+  UserProfileParamsSchema,
 } from "@pi-harness/memory";
 import type { FastifyInstance } from "fastify";
 import { Type } from "typebox";
@@ -71,6 +78,37 @@ export async function registerMemoryRoutes(
       },
     },
     controller.remove,
+  );
+  server.post<{ Body: CreateUserProfileInput }>(
+    "/api/user-profiles",
+    {
+      schema: {
+        body: CreateUserProfileInputSchema,
+        response: { 200: UserProfileItemSchema, ...errors },
+      },
+    },
+    controller.createProfile,
+  );
+  server.patch<{ Body: UpdateUserProfileInput; Params: UserProfileParams }>(
+    "/api/user-profiles/:profileId",
+    {
+      schema: {
+        body: UpdateUserProfileInputSchema,
+        params: UserProfileParamsSchema,
+        response: { 200: UserProfileItemSchema, ...errors },
+      },
+    },
+    controller.updateProfile,
+  );
+  server.delete<{ Params: UserProfileParams }>(
+    "/api/user-profiles/:profileId",
+    {
+      schema: {
+        params: UserProfileParamsSchema,
+        response: { 204: Type.Null(), ...errors },
+      },
+    },
+    controller.removeProfile,
   );
   server.patch<{ Body: UpdateMemorySettingsInput }>(
     "/api/memory-settings",

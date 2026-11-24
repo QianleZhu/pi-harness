@@ -1,5 +1,6 @@
 import {
   type CreateMemoryInput,
+  type CreateUserProfileInput,
   type MemoryRecord,
   MemoryRecordSchema,
   type MemorySettings,
@@ -8,6 +9,9 @@ import {
   MemoryStateSchema,
   type UpdateMemoryInput,
   type UpdateMemorySettingsInput,
+  type UpdateUserProfileInput,
+  type UserProfileItem,
+  UserProfileItemSchema,
 } from "@pi-harness/memory/contract";
 import type { Static, TSchema } from "typebox";
 import { Value } from "typebox/value";
@@ -46,6 +50,31 @@ export async function updateMemory(
 export async function deleteMemory(memoryId: string, expectedRevision: number): Promise<void> {
   await apiRequest(`/api/memories/${encodeURIComponent(memoryId)}`, {
     body: JSON.stringify({ expectedRevision }),
+    method: "DELETE",
+  });
+}
+
+export async function createUserProfile(input: CreateUserProfileInput): Promise<UserProfileItem> {
+  const response = await apiRequest("/api/user-profiles", {
+    body: JSON.stringify(input),
+    method: "POST",
+  });
+  return readBody(response, UserProfileItemSchema);
+}
+
+export async function updateUserProfile(
+  profileId: string,
+  input: UpdateUserProfileInput,
+): Promise<UserProfileItem> {
+  const response = await apiRequest(`/api/user-profiles/${encodeURIComponent(profileId)}`, {
+    body: JSON.stringify(input),
+    method: "PATCH",
+  });
+  return readBody(response, UserProfileItemSchema);
+}
+
+export async function deleteUserProfile(profileId: string): Promise<void> {
+  await apiRequest(`/api/user-profiles/${encodeURIComponent(profileId)}`, {
     method: "DELETE",
   });
 }

@@ -14,6 +14,8 @@ export {
   type RunMemorySnapshot,
   type StoredMemoryEmbedding,
   type StoredMemoryInput,
+  type StoredUserProfileInput,
+  type UserProfileRepository,
   type VisibleMemoryEmbedding,
 } from "./memory-service.js";
 export {

@@ -99,7 +99,6 @@ export function searchOverflowProvisionalMemories(
         content,
         createdAt: item.createdAt,
         updatedAt: item.createdAt,
-        profileFacet: null,
         revision: 1,
         scope: MemoryScope.WORKSPACE,
         sourceSessionId: item.sessionId,

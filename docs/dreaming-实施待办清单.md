@@ -23,14 +23,14 @@
 - [x] 改造 `DreamingScheduler`：改为**整个 Workspace 无活动 Session 且所有 Session 空闲 30 分钟**才启动工作区 Dreaming。
 - [x] 改造 `DreamingService`、`SqliteDreamingRepository` 与 `dreaming-tools.ts`：启动时在 `claimPendingRuns` 同事务原子认领该 Workspace 当前全部待审暂存条目（含此前失败批次遗留条目）；发布或无正式变更完成时仅物理删除本批认领记录，移除 `context.md` 3 轮冲突比对与临时区剥离逻辑。
 - [x] 验证多 Session 并发写入、同 Session 落表立即可见与跨 Session 隔离、内存拼装不改 `context.md`、超预算降级检索、Workspace 级空闲调度、Dreaming 期间新写入隔离与遗留条目顺带审核、`pnpm typecheck` 与 `pnpm check`。
-- [ ] 用户人工代码阅读与校验（步骤 2）。
+- [x] 用户人工代码阅读与校验（步骤 2）。
 
 ### 步骤 3：用户个性独立表拆分与 API 边界收窄
 
-- [ ] 新增显式 SQLite migration 建立独立 `user_profiles` 表，迁移原 `memories` 中 `scope = 'user' AND profile_facet IS NOT NULL` 的记录，并重建仅含跨项目全局记忆的 `global_memory_versions`。
-- [ ] 更新 `packages/memory` 契约与服务：拆分独立的用户个性读写契约（仅用户手动维护），全局记忆去掉 `profileFacet` 仅保留跨项目经验，daemon 记忆 API 收窄为仅管理「用户个性」和「全局记忆」（禁止通过 Web API 查看/修改 `workspace` 记忆）。
-- [ ] `RunMemorySnapshot` 同步快照独立用户个性并在上下文中全量注入；同步清理 `GlobalDreamingService` 中的 `profileFacet`。
-- [ ] 验证 migration 数据迁移兼容性、用户个性 CRUD、全局记忆与工作区记忆 API 边界隔离、快照注入、`pnpm typecheck` 与 `pnpm check`。
+- [x] 新增显式 SQLite migration 建立独立 `user_profiles` 表，迁移原 `memories` 中 `scope = 'user' AND profile_facet IS NOT NULL` 的记录，并重建仅含跨项目全局记忆的 `global_memory_versions`。
+- [x] 更新 `packages/memory` 契约与服务：拆分独立的用户个性读写契约（仅用户手动维护），全局记忆去掉 `profileFacet` 仅保留跨项目经验，daemon 记忆 API 收窄为仅管理「用户个性」和「全局记忆」（禁止通过 Web API 查看/修改 `workspace` 记忆）。
+- [x] `RunMemorySnapshot` 同步快照独立用户个性并在上下文中全量注入；同步清理 `GlobalDreamingService` 中的 `profileFacet`。
+- [x] 验证 migration 数据迁移兼容性、用户个性 CRUD、全局记忆与工作区记忆 API 边界隔离、快照注入、`pnpm typecheck` 与 `pnpm check`。
 - [ ] 用户人工代码阅读与校验（步骤 3）。
 
 ### 步骤 4：全局跨项目记忆乐观锁增量合并与跨进程兜底

@@ -14,8 +14,12 @@ import {
   UserProfileFacet,
   type UserProfileFacet as UserProfileFacetValue,
 } from "./contract.js";
-import type { RecordedMemory, RecordMemoryInput } from "./dreaming.js";
+import type { ProvisionalMemory, RecordedMemory, RecordMemoryInput } from "./dreaming.js";
 import { buildMemoryContextPrompt } from "./prompts/memory-context-prompt.js";
+import {
+  formatProvisionalMemoriesContext,
+  searchOverflowProvisionalMemories,
+} from "./utils/provisional-context.js";
 
 export const MemoryErrorCode = {
   CONFLICT: "MEMORY_CONFLICT",
@@ -110,9 +114,10 @@ export interface MemoryRepository {
   updateSettings(settings: MemorySettings, updatedAt: number): void;
 }
 
-// Run 固定开关、上下文、Wiki 版本和每条可见记忆的当前版本。
+// Run 固定开关、上下文、Wiki 版本、每条可见记忆版本以及本 Session 待审暂存记录。
 export interface RunMemorySnapshot {
   workspaceId: string;
+  sessionId?: string;
   settings?: MemorySettings;
   contextDirectoryId: string | null;
   contextVersion: number | null;
@@ -122,11 +127,12 @@ export interface RunMemorySnapshot {
   globalVersion?: number;
   globalMemories?: readonly MemoryRecord[];
   workspaceMemories?: readonly MemoryRecord[];
+  provisionalMemories?: readonly ProvisionalMemory[];
 }
 
 // 主 Agent 读取已发布的 Dreaming 内容，具体存储由 daemon 提供。
 export interface DreamingReader {
-  captureSnapshot(workspaceId: string): RunMemorySnapshot;
+  captureSnapshot(workspaceId: string, sessionId?: string): RunMemorySnapshot;
   readContext(workspaceId: string, snapshot?: RunMemorySnapshot): Promise<string | null>;
   readGlobalContext(snapshot?: RunMemorySnapshot): string | null;
   readWiki(
@@ -158,7 +164,7 @@ export interface MemoryRecorder {
 }
 
 export interface MemoryRuntime {
-  captureSnapshot(workspaceId: string): RunMemorySnapshot | null;
+  captureSnapshot(workspaceId: string, sessionId?: string): RunMemorySnapshot | null;
   buildContext(
     workspaceId: string,
     signal?: AbortSignal,
@@ -262,12 +268,13 @@ export class MemoryService implements MemoryRuntime {
     private readonly recorder?: MemoryRecorder,
   ) {}
 
-  // 为主 Run 固定开关状态、记忆和 Wiki 的发布版本；运行中途切换开关不影响本次 Run。
-  public captureSnapshot(workspaceId: string): RunMemorySnapshot | null {
+  // 为主 Run 固定开关状态、记忆、Wiki 发布版本及本 Session 的待审暂存记录；运行中途切换开关不影响本次 Run。
+  public captureSnapshot(workspaceId: string, sessionId?: string): RunMemorySnapshot | null {
     const settings = this.repository.getSettings();
     if (!settings.useMemories || !this.dreaming)
       return {
         workspaceId,
+        ...(sessionId ? { sessionId } : {}),
         settings,
         contextDirectoryId: null,
         contextVersion: null,
@@ -276,9 +283,10 @@ export class MemoryService implements MemoryRuntime {
         versions: new Map(),
         globalMemories: [],
         workspaceMemories: [],
+        provisionalMemories: [],
       };
     return {
-      ...this.dreaming.captureSnapshot(workspaceId),
+      ...this.dreaming.captureSnapshot(workspaceId, sessionId),
       settings,
     };
   }
@@ -512,10 +520,25 @@ export class MemoryService implements MemoryRuntime {
             : snapshot.globalMemories,
         )
       : this.repository.searchKeywordVisible(normalizedQuery, workspaceId, candidateLimit);
+    const overflowProvisional =
+      requireMemoryUse && snapshot?.provisionalMemories?.length
+        ? formatProvisionalMemoriesContext(snapshot.provisionalMemories).overflow
+        : [];
+    const overflowHits = searchOverflowProvisionalMemories(
+      normalizedQuery,
+      overflowProvisional,
+      resultLimit,
+    );
+    const mergeOverflow = (base: readonly MemoryRecord[]): readonly MemoryRecord[] => {
+      if (!overflowHits.length) return base.slice(0, resultLimit);
+      const seen = new Set(base.map((item) => item.id));
+      const extra = overflowHits.filter((item) => !seen.has(item.id));
+      return [...base, ...extra].slice(0, resultLimit);
+    };
     try {
       await this.ensureEmbeddingIndex(signal);
       const [queryVector] = await this.embedMany("query", [normalizedQuery], signal);
-      if (!queryVector) return keyword.slice(0, resultLimit);
+      if (!queryVector) return mergeOverflow(keyword);
       const semanticScores = (
         snapshot
           ? this.repository.listSnapshotEmbeddings(
@@ -541,14 +564,14 @@ export class MemoryService implements MemoryRuntime {
         .slice(0, candidateLimit)
         .map(({ memory }) => memory);
 
-      return fuseRanks(keyword, semantic).slice(0, resultLimit);
+      return mergeOverflow(fuseRanks(keyword, semantic));
     } catch (error: unknown) {
       if (signal?.aborted) throw error;
-      return keyword.slice(0, resultLimit);
+      return mergeOverflow(keyword);
     }
   }
 
-  // 使用 Run 固定的开关与上下文版本，不在启动时检索用户提问，也不因中途切换开关截断本次组装。
+  // 使用 Run 固定的开关、上下文版本及本 Session 暂存记录在内存中拼装，不写入磁盘 context.md。
   public async buildContext(
     workspaceId: string,
     _signal?: AbortSignal,
@@ -564,10 +587,14 @@ export class MemoryService implements MemoryRuntime {
       settings.useMemories && this.dreaming
         ? this.dreaming.readGlobalContext(snapshot ?? undefined)
         : null;
+    const provisionalContext = settings.useMemories
+      ? formatProvisionalMemoriesContext(snapshot?.provisionalMemories ?? []).text
+      : null;
     return buildMemoryContextPrompt(
       settings,
       settings.useMemories ? context : null,
       settings.useMemories ? globalContext : null,
+      provisionalContext,
     );
   }
 

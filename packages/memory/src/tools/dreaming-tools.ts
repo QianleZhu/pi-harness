@@ -9,6 +9,7 @@ import {
   MemoryEvidenceStatus,
   type MemoryRevision,
   type MemoryRevisionSource,
+  type ProvisionalMemory,
 } from "../dreaming.js";
 import type { MemoryRepository, MemoryService } from "../memory-service.js";
 import { SEARCH_MEMORIES_TOOL_NAME } from "../memory-tools.js";
@@ -50,6 +51,7 @@ const ReadRunSchema = Type.Object({
   runId: Type.String(),
 });
 const ListRunsSchema = Type.Object({});
+const ListProvisionalSchema = Type.Object({});
 const ReadWikiSchema = Type.Object({ name: Type.Optional(Type.String()) });
 const ReadContextSchema = Type.Object({});
 const WriteContextSchema = Type.Object({
@@ -114,6 +116,7 @@ export function createDreamingTools(options: {
   input: { workspaceId: string };
   signal: AbortSignal;
   runs: ReadonlyMap<string, readonly DreamingEvent[]>;
+  provisionalMemories?: readonly ProvisionalMemory[];
   readRuns: Set<string>;
   files: Map<string, string>;
   context: { content: string };
@@ -136,6 +139,7 @@ export function createDreamingTools(options: {
     input,
     signal,
     runs,
+    provisionalMemories = [],
     readRuns,
     files,
     context,
@@ -195,6 +199,30 @@ export function createDreamingTools(options: {
             eventCount: runEvents.length,
             runId,
             sessionId: runEvents[0]?.sessionId ?? null,
+          })),
+        );
+      },
+    },
+    {
+      name: "list_provisional_memories",
+      label: "List provisional memories",
+      description:
+        "List every pending provisional memory claimed in this workspace batch for auditing.",
+      executionMode: "sequential",
+      parameters: ListProvisionalSchema,
+      execute: async (_id, value) => {
+        count();
+        validateToolInput(ListProvisionalSchema, value);
+        return result(
+          provisionalMemories.map((item) => ({
+            id: item.id,
+            sessionId: item.sessionId,
+            runId: item.runId,
+            inBatchRuns: runs.has(item.runId),
+            content: item.content,
+            applicability: item.applicability,
+            evidenceStatus: item.evidenceStatus,
+            createdAt: item.createdAt,
           })),
         );
       },

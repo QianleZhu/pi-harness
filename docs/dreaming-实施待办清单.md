@@ -13,16 +13,16 @@
 - [x] `RunMemorySnapshot` 固定本次 Run 的 `useMemories`，移除 `buildContext` / `readWiki` / `readRevision` / `readSource` / `search` 在 Run 中途因关闭开关导致的拦截。
 - [x] 简化 `dreaming_runs` 登记与结束逻辑：`generateMemories = true` 时发起的 Run 结束一律正常转 `pending`（取消跨开关 `dreaming_generation` 跳过逻辑）；关闭开关后不中止已启动的写入工具与 Dreaming 批次，只阻止启动下一次，重新开启后一并整理残留 `pending` Run。
 - [x] 验证 2×2 开关组合、Run 中途关开关不中断、关闭暂停与重开恢复、`pnpm typecheck` 与 `pnpm check`。
-- [ ] 用户人工代码阅读与校验（步骤 1）。
+- [x] 用户人工代码阅读与校验（步骤 1）。
 
 ### 步骤 2：工作区在线暂存表 `provisional_memories`、内存拼装注入与 Workspace 级空闲 Dreaming
 
-- [ ] 新增显式 SQLite migration 建立 `provisional_memories`（Append-Only，含 `workspace_id`、`session_id`、`run_id`、`content`、`applicability`、`evidence_status`、`status`、`created_at`、`resolved_at`）。
-- [ ] 改造 `MemoryRecorderService`：只向 `provisional_memories` 插入 `pending` 记录，不再写入正式 `memories` 表、不再改写磁盘 `context.md` 或 CAS 更新 `dreaming_context`。
-- [ ] 改造 `RunMemorySnapshot`、`DreamingReaderService` 与 `MemoryService`：按 `(workspaceId, sessionId)` 读取同 Session 已落表的 `pending` 暂存记录，在 `buildContext()` 内存中拼装独立区块（独立预算，超出按方案 A 降级关键词检索，不建向量索引），跨 Session 互相隔离。
-- [ ] 改造 `DreamingScheduler`：改为**整个 Workspace 无活动 Session 且所有 Session 空闲 30 分钟**才启动工作区 Dreaming。
-- [ ] 改造 `DreamingService`、`SqliteDreamingRepository` 与 `dreaming-tools.ts`：启动时在 `claimPendingRuns` 同事务原子认领该 Workspace 当前全部 `pending` 暂存条目（含此前失败批次遗留条目）；发布时仅更新本批认领记录状态，移除 `context.md` 3 轮冲突比对与临时区剥离逻辑。
-- [ ] 验证多 Session 并发写入、同 Session 落表立即可见与跨 Session 隔离、内存拼装不改 `context.md`、超预算降级检索、Workspace 级空闲调度、Dreaming 期间新写入隔离与遗留条目顺带审核、`pnpm typecheck` 与 `pnpm check`。
+- [x] 新增显式 SQLite migration 建立 `provisional_memories`（Append-Only，含 `workspace_id`、`session_id`、`run_id`、`content`、`applicability`、`evidence_status`、`created_at`，处理完成后物理删除）。
+- [x] 改造 `MemoryRecorderService`：只向 `provisional_memories` 插入待审记录，不再写入正式 `memories` 表、不再改写磁盘 `context.md` 或 CAS 更新 `dreaming_context`。
+- [x] 改造 `RunMemorySnapshot`、`DreamingReaderService` 与 `MemoryService`：按 `(workspaceId, sessionId)` 读取同 Session 已落表的待审暂存记录，在 `buildContext()` 内存中拼装独立区块（独立预算，超出按方案 A 降级关键词检索，不建向量索引），跨 Session 互相隔离。
+- [x] 改造 `DreamingScheduler`：改为**整个 Workspace 无活动 Session 且所有 Session 空闲 30 分钟**才启动工作区 Dreaming。
+- [x] 改造 `DreamingService`、`SqliteDreamingRepository` 与 `dreaming-tools.ts`：启动时在 `claimPendingRuns` 同事务原子认领该 Workspace 当前全部待审暂存条目（含此前失败批次遗留条目）；发布或无正式变更完成时仅物理删除本批认领记录，移除 `context.md` 3 轮冲突比对与临时区剥离逻辑。
+- [x] 验证多 Session 并发写入、同 Session 落表立即可见与跨 Session 隔离、内存拼装不改 `context.md`、超预算降级检索、Workspace 级空闲调度、Dreaming 期间新写入隔离与遗留条目顺带审核、`pnpm typecheck` 与 `pnpm check`。
 - [ ] 用户人工代码阅读与校验（步骤 2）。
 
 ### 步骤 3：用户个性独立表拆分与 API 边界收窄

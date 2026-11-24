@@ -138,7 +138,7 @@ export class AgentManager {
   }
 
   public async startRun(input: StartSessionRunInput): Promise<void> {
-    const memorySnapshot = this.memory.captureSnapshot(input.workspaceId);
+    const memorySnapshot = this.memory.captureSnapshot(input.workspaceId, input.sessionId);
     const [workspaceContext, memoryContext] = await Promise.all([
       loadWorkspaceAgentContext({
         getRegisteredGlobalSkills: this.getRegisteredGlobalSkills,

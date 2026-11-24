@@ -14,7 +14,10 @@ import { LocalMemoryEmbedder } from "../services/local-memory-embedder.js";
 import { ProviderService } from "../services/provider-service.js";
 import { type HarnessDatabase, openHarnessDatabase } from "../storage/database.js";
 import { SessionEventStore } from "../storage/session-event-store.js";
-import { cleanupDreamingContextDirectories, cleanupDreamingDirectories } from "../utils/dreaming-wiki.js";
+import {
+  cleanupDreamingContextDirectories,
+  cleanupDreamingDirectories,
+} from "../utils/dreaming-wiki.js";
 
 type Pending = {
   resolve: (value: unknown) => void;
@@ -165,6 +168,7 @@ async function start(paths: {
   scheduler = new DreamingScheduler(
     database.dreaming,
     memories,
+    database.sessions,
     eventStore,
     providers,
     service,

@@ -200,12 +200,7 @@ export async function createServer(config: HarnessConfig = loadHarnessConfig()) 
   );
   providers.setAvailabilityObserver(() => dreamingWorker?.providersChanged());
   const localMemoryEmbedder = new LocalMemoryEmbedder(config.globalRoot);
-  const memoryRecorder = new MemoryRecorderService(
-    config.globalRoot,
-    database.dreaming,
-    database.memories,
-    localMemoryEmbedder,
-  );
+  const memoryRecorder = new MemoryRecorderService(database.dreaming, database.memories);
   const memories = new MemoryService(
     database.memories,
     {

@@ -65,7 +65,7 @@ function createRecordMemoryTool(
 ): AgentTool<typeof RecordMemoryParameters> {
   return {
     description:
-      "在工作过程中记录当前工作区值得后续复用的项目事实、决策或经验。内容会写入工作区长期记忆，并追加到注入上下文的独立区块；Dreaming 后续用会话日志校验。不要保存秘密、临时进度、工作区已有明确规则或跨项目用户画像。",
+      "在工作过程中记录当前工作区值得后续复用的项目事实、决策或经验。内容会写入当前会话的在线暂存表，在同会话后续 Run 启动时自动拼入上下文，并由 Dreaming 后续用会话日志校验整理。不要保存秘密、临时进度、工作区已有明确规则或跨项目用户个性。",
     executionMode: "sequential",
     label: "Record memory",
     name: RECORD_MEMORY_TOOL_NAME,
@@ -137,8 +137,8 @@ export function createMemoryToolRegistrations(
       policy: learningPolicy(
         memory,
         RecordMemoryParameters,
-        "记录工作区记忆",
-        "该内容会作为工作区长期记忆进入后续对话，并追加到注入上下文，等待 Dreaming 用会话日志校验。",
+        "记录工作区暂存记忆",
+        "该内容会写入当前会话的在线暂存区，供同会话后续对话参考，并等待 Dreaming 用会话日志校验整理。",
         (args) => (args as Static<typeof RecordMemoryParameters>).content,
       ),
       source: MEMORY_TOOL_SOURCE,

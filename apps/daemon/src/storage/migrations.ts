@@ -726,4 +726,25 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
       }
     },
   },
+  {
+    version: "032-provisional-memories.sql",
+    sql: `
+      CREATE TABLE provisional_memories (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        run_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        normalized_content TEXT NOT NULL,
+        applicability TEXT,
+        evidence_status TEXT NOT NULL CHECK (evidence_status IN
+          ('user_stated', 'practiced', 'unverified')),
+        created_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX provisional_memories_session_idx
+        ON provisional_memories(workspace_id, session_id, created_at);
+      CREATE INDEX provisional_memories_workspace_idx
+        ON provisional_memories(workspace_id, created_at);
+    `,
+  },
 ];

@@ -28,11 +28,11 @@ Session JSONL：原始对话、工具调用和结果
 | 记忆摘要 | 可跨 Session 复用的项目事实、决策、经验和教训 | SQLite `memories`、`memory_revisions`、`memory_revision_sources`（工作区正式记忆仅由 Dreaming 写入） |
 | Wiki 与导航 | 对摘要的主题组织和综合结论 | daemon 数据目录按 workspace 保存 Markdown 文件，可由摘要重新整理 |
 | 注入上下文 | 从 Wiki 提取的核心摘要和导航 | 独立的 `dreaming_context` 指针与 `dreaming_context_versions` 版本，内容保存为纯正式 Markdown 副本，仅由 Dreaming 写入 |
-| 在线暂存笔记 | Run 过程中主动记录、尚未审计的临时工作区记忆 | SQLite `provisional_memories`（Append-Only，绑定 `workspace_id`、`session_id`、`run_id` 与处理状态） |
+| 在线暂存笔记 | Run 过程中主动记录、尚未审计的临时工作区记忆 | SQLite `provisional_memories`（Append-Only，绑定 `workspace_id`、`session_id`、`run_id`，审核完成后物理删除） |
 
-`record_memory` 只向 `provisional_memories` 追加一条 `pending` 记录，不写入正式 `memories` 表，也不修改磁盘上的 `context.md` 或 Wiki。同一 Session 的后续 Run 在启动拍快照时，只要暂存记录已落表就立即可见，并在内存中拼装进发给主 Agent 的上下文（独立小预算，超出预算按关键词降级检索，不建向量索引）；不同 Session 之间的未审计暂存记录在 Dreaming 前互相隔离。
+`record_memory` 只向 `provisional_memories` 追加一条待审记录，不写入正式 `memories` 表，也不修改磁盘上的 `context.md` 或 Wiki。同一 Session 的后续 Run 在启动拍快照时，只要暂存记录已落表就立即可见，并在内存中拼装进发给主 Agent 的上下文（独立小预算，超出预算按关键词降级检索，不建向量索引）；不同 Session 之间的未审计暂存记录在 Dreaming 前互相隔离。
 
-Dreaming 启动时原子认领本工作区当前所有 `pending` 暂存记录（包含本批 Run 以及此前失败批次遗留的待审条目）；审计后在发布事务中仅更新本批认领记录的状态（`promoted` / `rejected`）。Dreaming 运行期间新会话写入的暂存记录不在认领集合内，互不冲突并留待下一轮 Dreaming 审核。
+Dreaming 启动时原子认领本工作区当前所有待审暂存记录（包含本批 Run 以及此前失败批次遗留的待审条目）；审计后在发布或完成事务中仅物理删除本批认领的暂存记录。Dreaming 运行期间新会话写入的暂存记录不在认领集合内，互不冲突并留待下一轮 Dreaming 审核。
 
 ## 系统职责
 
@@ -154,9 +154,9 @@ Agent 完成后：
 1. 分别校验上下文预算与导航，以及 Wiki 文件名、预算、导航和 `[memory:ID@REVISION]` 引用；
 2. 准备记忆 embedding，失败时退化为关键词召回；
 3. 写入新的 Wiki 目录和新的上下文目录；
-4. 在一个 SQLite 事务中更新记忆、版本、来源、索引、上下文指针、Wiki 指针、Run 状态，以及仅将本批认领的 `provisional_memories` 标记为 `promoted` 或 `rejected`。
+4. 在一个 SQLite 事务中更新记忆、版本、来源、索引、上下文指针、Wiki 指针、Run 状态，并物理删除本批认领的 `provisional_memories`。
 
-没有记忆、上下文、Wiki 或暂存记录变化时不创建新版本。如果本批仅拒绝了暂存记录而未改变正式记忆、上下文或 Wiki，则只更新 Run 与暂存记录状态，不创建新版本。
+没有记忆、上下文、Wiki 或暂存记录变化时不创建新版本。如果本批仅清理了暂存记录而未改变正式记忆、上下文或 Wiki，则只更新 Run 状态并删除本批暂存记录，不创建新版本。
 
 由于工作区正式 L1/L2/L3 仅由 Dreaming Worker 单写者维护，且在线 `record_memory` 只追加写入 `provisional_memories`，Dreaming 运行期间新进入会话的写入与本次发布完全隔离，不再需要发布前的上下文版本比对循环与临时区块剥离逻辑。
 

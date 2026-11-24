@@ -7,6 +7,7 @@ import {
   MemoryRecordSchema,
   type MemoryRevision,
   type MemoryRevisionSource,
+  type ProvisionalMemory,
   type RunMemorySnapshot,
   DreamingRunStatus as RunStatus,
   resolveDreamingRevision,
@@ -53,12 +54,33 @@ function mapRevision(row: Record<string, unknown>): MemoryRevision {
   };
 }
 
-// 管理 Dreaming 的版本、来源、发布指针和 Run 记录。
+// 将 SQLite 的暂存记忆行映射到领域类型。
+function mapProvisionalMemory(row: Record<string, unknown>): ProvisionalMemory {
+  const evidenceStatus = row.evidence_status;
+  if (
+    typeof evidenceStatus !== "string" ||
+    !Object.values(MemoryEvidenceStatus).some((value) => value === evidenceStatus)
+  ) {
+    throw new Error("Invalid provisional memory evidence status");
+  }
+  return {
+    id: String(row.id),
+    workspaceId: String(row.workspace_id),
+    sessionId: String(row.session_id),
+    runId: String(row.run_id),
+    content: String(row.content),
+    applicability: row.applicability === null ? null : String(row.applicability),
+    evidenceStatus: evidenceStatus as MemoryEvidenceStatus,
+    createdAt: Number(row.created_at),
+  };
+}
+
+// 管理 Dreaming 的版本、来源、发布指针、在线暂存表和 Run 记录。
 export class SqliteDreamingRepository {
   public constructor(private readonly database: DatabaseSync) {}
 
-  // 在同一读取事务中固定 Wiki、上下文指针和所有可见记忆的版本。
-  public captureSnapshot(workspaceId: string): RunMemorySnapshot {
+  // 在同一读取事务中固定 Wiki、上下文指针、所有可见记忆版本以及本 Session 待审暂存记录。
+  public captureSnapshot(workspaceId: string, sessionId?: string): RunMemorySnapshot {
     this.database.exec("BEGIN");
     try {
       const wikiDirectoryId = this.findWiki(workspaceId)?.directoryId ?? null;
@@ -93,9 +115,13 @@ export class SqliteDreamingRepository {
       const workspaceMemories: unknown = JSON.parse(workspaceRow.memories_json);
       if (!Value.Check(Type.Array(MemoryRecordSchema), workspaceMemories))
         throw new Error("Invalid workspace snapshot");
+      const provisionalMemories = sessionId
+        ? this.listSessionPendingProvisionalMemories(workspaceId, sessionId)
+        : [];
       this.database.exec("COMMIT");
       return {
         workspaceId,
+        ...(sessionId ? { sessionId } : {}),
         contextDirectoryId: context?.directoryId ?? null,
         contextVersion,
         wikiDirectoryId,
@@ -104,11 +130,92 @@ export class SqliteDreamingRepository {
         globalVersion: global.version,
         globalMemories: global.memories,
         workspaceMemories: workspaceMemories as import("@pi-harness/memory").MemoryRecord[],
+        provisionalMemories,
       };
     } catch (error: unknown) {
       this.database.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  // 主 Agent 向在线暂存表追加一条待审工作区记忆，同 Session 重复内容幂等复用。
+  public createProvisionalMemory(input: {
+    id: string;
+    workspaceId: string;
+    sessionId: string;
+    runId: string;
+    content: string;
+    normalizedContent: string;
+    applicability: string | null;
+    evidenceStatus: MemoryEvidenceStatus;
+    now: number;
+  }): { id: string; created: boolean } {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.database
+        .prepare(
+          `SELECT id FROM provisional_memories
+           WHERE workspace_id = ? AND session_id = ? AND normalized_content = ?
+           LIMIT 1`,
+        )
+        .get(input.workspaceId, input.sessionId, input.normalizedContent);
+      if (existing) {
+        this.database.exec("COMMIT");
+        return {
+          id: String(existing.id),
+          created: false,
+        };
+      }
+      this.database
+        .prepare(
+          `INSERT INTO provisional_memories
+           (id, workspace_id, session_id, run_id, content, normalized_content, applicability, evidence_status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.id,
+          input.workspaceId,
+          input.sessionId,
+          input.runId,
+          input.content,
+          input.normalizedContent,
+          input.applicability,
+          input.evidenceStatus,
+          input.now,
+        );
+      this.database.exec("COMMIT");
+      return { id: input.id, created: true };
+    } catch (error: unknown) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  // 仅读取同一 Session 尚未审核的暂存记忆，供同 Session 后续 Run 内存拼装注入。
+  public listSessionPendingProvisionalMemories(
+    workspaceId: string,
+    sessionId: string,
+  ): ProvisionalMemory[] {
+    return this.database
+      .prepare(
+        `SELECT * FROM provisional_memories
+         WHERE workspace_id = ? AND session_id = ?
+         ORDER BY created_at ASC, id ASC`,
+      )
+      .all(workspaceId, sessionId)
+      .map(mapProvisionalMemory);
+  }
+
+  // 读取工作区当前全部待审暂存记忆（含此前失败批次遗留条目）。
+  public listWorkspacePendingProvisionalMemories(workspaceId: string): ProvisionalMemory[] {
+    return this.database
+      .prepare(
+        `SELECT * FROM provisional_memories
+         WHERE workspace_id = ?
+         ORDER BY session_id, created_at ASC, id ASC`,
+      )
+      .all(workspaceId)
+      .map(mapProvisionalMemory);
   }
 
   // 读取当前 user 记忆发布版本及其不可变副本。
@@ -349,12 +456,12 @@ export class SqliteDreamingRepository {
     });
   }
 
-  // 同一事务领取待整理的 Run，避免重复启动整理 Agent。
+  // 同一事务领取待整理的 Run 与工作区当前全部待审暂存记录（含此前失败批次遗留条目）。
   public claimPendingRuns(
     runIds: readonly string[],
     workspaceId: string,
     updatedAt: number,
-  ): boolean {
+  ): ProvisionalMemory[] | null {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const update = this.database.prepare(
@@ -366,18 +473,19 @@ export class SqliteDreamingRepository {
             .changes !== 1
         ) {
           this.database.exec("ROLLBACK");
-          return false;
+          return null;
         }
       }
+      const provisionalMemories = this.listWorkspacePendingProvisionalMemories(workspaceId);
       this.database.exec("COMMIT");
-      return true;
+      return provisionalMemories;
     } catch (error: unknown) {
       this.database.exec("ROLLBACK");
       throw error;
     }
   }
 
-  // 本批整理失败时同步清除候选并终结所有 Run。
+  // 本批整理失败时同步清除候选并终结所有 Run；暂存记录保持 pending 留待下次正常整理顺带审核。
   public failConsolidation(runIds: readonly string[], updatedAt: number): void {
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -393,8 +501,24 @@ export class SqliteDreamingRepository {
     }
   }
 
-  // 无需更新记忆时原子完成整批 Run 并清除候选。
-  public completeConsolidation(runIds: readonly string[], updatedAt: number): void {
+  // 在调用方事务内物理删除本批认领的暂存记录，绝不触碰整理期间新写入的暂存记录。
+  private deleteProvisionalMemories(workspaceId: string, ids: readonly string[]): void {
+    if (!ids.length) return;
+    const remove = this.database.prepare(
+      "DELETE FROM provisional_memories WHERE id = ? AND workspace_id = ?",
+    );
+    for (const id of ids) {
+      remove.run(id, workspaceId);
+    }
+  }
+
+  // 无需更新正式记忆或 Wiki 时原子完成整批 Run，并物理删除本批认领的暂存记录。
+  public completeConsolidation(
+    runIds: readonly string[],
+    updatedAt: number,
+    workspaceId?: string,
+    provisionalIds: readonly string[] = [],
+  ): void {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const update = this.database.prepare(
@@ -405,6 +529,9 @@ export class SqliteDreamingRepository {
           update.run(RunStatus.COMPLETED, updatedAt, runId, RunStatus.CONSOLIDATING).changes !== 1
         )
           throw new Error("Dreaming batch is not consolidating");
+      }
+      if (workspaceId && provisionalIds.length) {
+        this.deleteProvisionalMemories(workspaceId, provisionalIds);
       }
       this.database.exec("COMMIT");
     } catch (error: unknown) {
@@ -540,30 +667,6 @@ export class SqliteDreamingRepository {
       .prepare(`INSERT INTO dreaming_context (workspace_id, directory_id, updated_at) VALUES (?, ?, ?)
       ON CONFLICT(workspace_id) DO UPDATE SET directory_id = excluded.directory_id, updated_at = excluded.updated_at`)
       .run(input.workspaceId, input.directoryId, input.now);
-  }
-
-  // 主 Agent 记录新上下文版本；指针已变化时由调用方重试。
-  public publishContext(input: {
-    workspaceId: string;
-    directoryId: string;
-    expectedDirectoryId: string | null;
-    now: number;
-  }): boolean {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      if (
-        (this.findContext(input.workspaceId)?.directoryId ?? null) !== input.expectedDirectoryId
-      ) {
-        this.database.exec("ROLLBACK");
-        return false;
-      }
-      this.saveContext(input);
-      this.database.exec("COMMIT");
-      return true;
-    } catch (error: unknown) {
-      this.database.exec("ROLLBACK");
-      throw error;
-    }
   }
 
   // 获取工作区当前发布的 Wiki 目录。
@@ -765,30 +868,7 @@ export class SqliteDreamingRepository {
     return { created, memoryId: change.memoryId, revision };
   }
 
-  // 主 Agent 记录一条工作区记忆，与 Dreaming 共用版本和索引结构。
-  public recordWorkspaceMemory(input: {
-    workspaceId: string;
-    sessionId: string;
-    change: DreamingMemoryChange;
-    now: number;
-  }): { memoryId: string; revision: number; created: boolean } {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const result = this.applyWorkspaceMemoryChange({
-        workspaceId: input.workspaceId,
-        change: input.change,
-        defaultSessionId: input.sessionId,
-        now: input.now,
-      });
-      this.database.exec("COMMIT");
-      return result;
-    } catch (error: unknown) {
-      this.database.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  // 将草案的记忆、来源、索引、上下文、Wiki 指针和 Run 状态作为一个事务发布。
+  // 将草案的记忆、来源、索引、上下文、Wiki 指针、Run 状态作为一个事务发布，并物理删除本批认领的暂存记录。
   public publish(input: {
     workspaceId: string;
     directoryId: string;
@@ -797,6 +877,7 @@ export class SqliteDreamingRepository {
     runIds?: readonly string[];
     changes: DreamingMemoryChange[];
     references?: { memoryId: string; revision: number; isCurrent: boolean }[];
+    provisionalIds?: readonly string[];
     expectedDirectoryId: string | null;
     expectedContextDirectoryId: string | null;
     now: number;
@@ -840,7 +921,6 @@ export class SqliteDreamingRepository {
           )
           .get(reference.memoryId, input.workspaceId);
         if (!row) throw new Error("Dreaming referenced memory missing");
-        // 整理期间主 Agent 可能推进版本；只要引用版本仍存在即可发布。
         if (
           row.revision !== reference.revision &&
           !this.findRevision(reference.memoryId, reference.revision)
@@ -868,6 +948,9 @@ export class SqliteDreamingRepository {
         directoryId: input.contextDirectoryId,
         now: input.now,
       });
+      if (input.provisionalIds?.length) {
+        this.deleteProvisionalMemories(input.workspaceId, input.provisionalIds);
+      }
       for (const id of runIds) {
         this.database
           .prepare(

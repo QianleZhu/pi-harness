@@ -12,11 +12,7 @@ import type { SqliteDreamingRepository } from "../storage/dreaming-repository.js
 import type { SqliteMemoryRepository } from "../storage/memory-repository.js";
 import type { SessionEventStore } from "../storage/session-event-store.js";
 import { textData } from "../utils/dreaming-events.js";
-import {
-  contextDirectory,
-  ID_PATTERN,
-  readContextFile,
-} from "../utils/dreaming-wiki.js";
+import { contextDirectory, ID_PATTERN, readContextFile } from "../utils/dreaming-wiki.js";
 
 // 从固定发布版本及其引用中读取工作区和全局记忆。
 export class DreamingReaderService implements DreamingReader {
@@ -28,9 +24,9 @@ export class DreamingReaderService implements DreamingReader {
     private readonly events: SessionEventStore,
   ) {}
 
-  // 固定 Run 启动时的 Wiki 与可见记忆版本。
-  public captureSnapshot(workspaceId: string): RunMemorySnapshot {
-    return this.dreaming.captureSnapshot(workspaceId);
+  // 固定 Run 启动时的 Wiki、可见记忆版本与本 Session 待审暂存记录。
+  public captureSnapshot(workspaceId: string, sessionId?: string): RunMemorySnapshot {
+    return this.dreaming.captureSnapshot(workspaceId, sessionId);
   }
 
   // 读取固定版本的注入上下文；上下文与 Wiki 分开存储。

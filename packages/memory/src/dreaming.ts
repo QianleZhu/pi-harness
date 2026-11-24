@@ -55,7 +55,19 @@ export interface GlobalDreamingMemoryChange extends DreamingMemoryChange {
 // Wiki 草案只接受单层 Markdown 文件名。
 export const DREAMING_WIKI_NAME_PATTERN = /^(?:index|context|[a-z0-9][a-z0-9_-]{0,63})\.md$/;
 
-// Agent 在 Run 中主动记录的工作区记忆，后续由 Dreaming 用会话日志校验。
+// 在线暂存记忆：仅保留尚未被 Dreaming 审核消化的条目，处理完成后物理删除。
+export interface ProvisionalMemory {
+  id: string;
+  workspaceId: string;
+  sessionId: string;
+  runId: string;
+  content: string;
+  applicability: string | null;
+  evidenceStatus: MemoryEvidenceStatus;
+  createdAt: number;
+}
+
+// Agent 在 Run 中主动记录的工作区暂存记忆，后续由 Dreaming 用会话日志校验。
 export interface RecordMemoryInput {
   workspaceId: string;
   sessionId: string;
@@ -66,13 +78,13 @@ export interface RecordMemoryInput {
 }
 
 export interface RecordedMemory {
-  memoryId: string;
-  revision: number;
+  id: string;
   created: boolean;
-  contextUpdated: boolean;
 }
 
-// 主动记录的记忆在第一层单独隔开，Dreaming 后续负责校验和整理。
+// 暂存记忆在内存拼装进注入上下文时使用独立预算，不挤压正式 context.md。
+export const PROVISIONAL_MEMORY_CONTEXT_BUDGET = 1_000;
+// 主动记录的记忆在上下文中单独隔开，仅内存拼装不落盘到 context.md。
 export const RECORDED_MEMORY_CONTEXT_HEADING = "## 当前运行记录的长期记忆";
 
 // 一个 Run 在 Dreaming 工作流中的状态。

@@ -87,8 +87,12 @@ export class DreamingService {
     signal.throwIfAborted();
     const settings = this.memories.getSettings();
     if (!settings.generateMemories) throw new Error("Dreaming learning is disabled");
-    if (!this.dreaming.claimPendingRuns(runIds, input.workspaceId, Date.now()))
-      throw new Error("Dreaming batch already claimed");
+    const claimedProvisional = this.dreaming.claimPendingRuns(
+      runIds,
+      input.workspaceId,
+      Date.now(),
+    );
+    if (!claimedProvisional) throw new Error("Dreaming batch already claimed");
 
     const runEvents = new Map<string, readonly HarnessEvent[]>();
     try {
@@ -113,10 +117,10 @@ export class DreamingService {
         currentWiki ? join(workspaceDir, currentWiki.directoryId) : null,
       );
       const originalFiles = new Map(files);
-      // 上下文和 Wiki 分开存储；任一结构缺失时由 Agent 根据原始日志搭建。
-      let expectedContextDirectoryId =
+      // 正式注入上下文仅由 Dreaming 单写者维护；兼容清理旧版本可能遗留的临时区块。
+      const expectedContextDirectoryId =
         this.dreaming.findContext(input.workspaceId)?.directoryId ?? null;
-      let contextVersion = expectedContextDirectoryId
+      const contextVersion = expectedContextDirectoryId
         ? this.dreaming.findContextVersion(input.workspaceId, expectedContextDirectoryId)
         : null;
       if (expectedContextDirectoryId && contextVersion === null)
@@ -126,10 +130,13 @@ export class DreamingService {
             contextDirectory(this.root, input.workspaceId, expectedContextDirectoryId),
           )
         : null;
+      const cleanCurrentContext = currentContext
+        ? stripRecordedMemorySection(currentContext)
+        : null;
       const contextDraft = {
-        content: currentContext?.trim() ? currentContext : DEFAULT_MEMORY_CONTEXT,
+        content: cleanCurrentContext?.trim() ? cleanCurrentContext : DEFAULT_MEMORY_CONTEXT,
       };
-      const originalContext = contextDraft.content;
+      const originalContext = currentContext?.trim() ? currentContext : DEFAULT_MEMORY_CONTEXT;
       const bootstrap = !files.has("index.md") || expectedContextDirectoryId === null;
       if (!files.has("index.md")) files.set("index.md", EMPTY_WIKI_INDEX);
       const changes: DreamingMemoryChange[] = [];
@@ -140,6 +147,7 @@ export class DreamingService {
         input: { workspaceId: input.workspaceId },
         signal,
         runs: runEvents,
+        provisionalMemories: claimedProvisional,
         readRuns,
         files,
         context: contextDraft,
@@ -190,6 +198,16 @@ export class DreamingService {
       try {
         await agent.prompt(
           JSON.stringify({
+            provisionalMemories: claimedProvisional.map((item) => ({
+              applicability: item.applicability,
+              content: item.content,
+              createdAt: item.createdAt,
+              evidenceStatus: item.evidenceStatus,
+              id: item.id,
+              inBatchRuns: runEvents.has(item.runId),
+              runId: item.runId,
+              sessionId: item.sessionId,
+            })),
             runs: batchRuns.map((run) => ({
               finishedAt: run.finishedAt,
               runId: run.runId,
@@ -203,51 +221,22 @@ export class DreamingService {
         const last = agent.state.messages.at(-1);
         if (last?.role !== "assistant" || last.stopReason !== "stop")
           throw new Error("Dreaming consolidation failed");
-        // 整理期间主 Agent 可能发布新的上下文版本；让 Agent 对比后再发布。
-        for (let round = 0; round < 3; round += 1) {
-          const latest = this.dreaming.findContext(input.workspaceId)?.directoryId ?? null;
-          const latestVersion = latest
-            ? this.dreaming.findContextVersion(input.workspaceId, latest)
-            : null;
-          if (latest === expectedContextDirectoryId && latestVersion === contextVersion) break;
-          if (round === 2) throw new Error("Dreaming context changed");
-          const latestContent = latest
-            ? await readContextFile(contextDirectory(this.root, input.workspaceId, latest))
-            : null;
-          signal.throwIfAborted();
-          await agent.prompt(
-            JSON.stringify({
-              contextChanged: true,
-              contextVersion: latestVersion,
-              latestPublishedContext: latestContent?.trim()
-                ? latestContent
-                : DEFAULT_MEMORY_CONTEXT,
-              message:
-                "The published context changed after your snapshot. Compare latestPublishedContext with read_context. If it adds durable knowledge not yet covered, draft memory or update the context draft; if it is already covered, keep your draft. Do not re-read unrelated runs.",
-            }),
-          );
-          signal.throwIfAborted();
-          const after = agent.state.messages.at(-1);
-          if (after?.role !== "assistant" || after.stopReason !== "stop")
-            throw new Error("Dreaming consolidation failed");
-          expectedContextDirectoryId = latest;
-          contextVersion = latestVersion;
-        }
       } finally {
         signal.removeEventListener("abort", abort);
       }
       if (!runIds.every((runId) => readRuns.has(runId)))
         throw new Error("Dreaming agent did not review every run");
 
-      // 临时区块已由 Agent 融入正式记忆，发布版本必须移除它。
-      const stripped = stripRecordedMemorySection(contextDraft.content);
-      const contextContent = stripped.trim() ? stripped : DEFAULT_MEMORY_CONTEXT;
+      const claimedProvisionalIds = claimedProvisional.map((item) => item.id);
+
+      const contextContent = contextDraft.content.trim()
+        ? contextDraft.content
+        : DEFAULT_MEMORY_CONTEXT;
       validateContext(contextContent, files);
       const hasMemoryChanges = changes.some((change) => {
         if (change.expectedRevision === null) return true;
         const memory = this.memoryStore.find(change.memoryId);
         if (!memory || memory.workspaceId !== input.workspaceId) return true;
-        // 以最新版本判断是否需要更新，兼容整理期间的并发写入。
         return (
           resolveDreamingRevision(
             change,
@@ -264,7 +253,12 @@ export class DreamingService {
         files.size === originalFiles.size &&
         [...files].every(([name, content]) => originalFiles.get(name) === content)
       ) {
-        this.dreaming.completeConsolidation(runIds, Date.now());
+        this.dreaming.completeConsolidation(
+          runIds,
+          Date.now(),
+          input.workspaceId,
+          claimedProvisionalIds,
+        );
         this.globalService.enqueue(input.workspaceId, globalCandidates);
         return;
       }
@@ -318,6 +312,7 @@ export class DreamingService {
         runIds,
         changes,
         references,
+        provisionalIds: claimedProvisionalIds,
         expectedDirectoryId: currentWiki?.directoryId ?? null,
         expectedContextDirectoryId,
         now: Date.now(),

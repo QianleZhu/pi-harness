@@ -101,7 +101,7 @@ export class SqliteDreamingRepository {
       if (context && contextVersion === null) throw new Error("Dreaming context version not found");
       const rows = this.database
         .prepare(`SELECT id, revision FROM memories
-        WHERE status = 'saved' AND (scope = 'user' OR workspace_id = ?)`)
+        WHERE status = 'saved' AND (scope = 'global' OR workspace_id = ?)`)
         .all(workspaceId);
       const versions = new Map(rows.map((row) => [String(row.id), Number(row.revision)]));
       const global = this.getGlobalVersion();
@@ -129,7 +129,7 @@ export class SqliteDreamingRepository {
       if (!Value.Check(Type.Array(UserProfileItemSchema), userProfiles))
         throw new Error("Invalid user profile snapshot");
       const provisionalMemories = sessionId
-        ? this.listSessionPendingProvisionalMemories(workspaceId, sessionId)
+        ? this.listSessionProvisionalMemories(workspaceId, sessionId)
         : [];
       this.database.exec("COMMIT");
       return {
@@ -206,7 +206,7 @@ export class SqliteDreamingRepository {
   }
 
   // 仅读取同一 Session 尚未审核的暂存记忆，供同 Session 后续 Run 内存拼装注入。
-  public listSessionPendingProvisionalMemories(
+  public listSessionProvisionalMemories(
     workspaceId: string,
     sessionId: string,
   ): ProvisionalMemory[] {
@@ -221,7 +221,7 @@ export class SqliteDreamingRepository {
   }
 
   // 读取工作区当前全部待审暂存记忆（含此前失败批次遗留条目）。
-  public listWorkspacePendingProvisionalMemories(workspaceId: string): ProvisionalMemory[] {
+  public listWorkspaceProvisionalMemories(workspaceId: string): ProvisionalMemory[] {
     return this.database
       .prepare(
         `SELECT * FROM provisional_memories
@@ -232,7 +232,7 @@ export class SqliteDreamingRepository {
       .map(mapProvisionalMemory);
   }
 
-  // 读取当前 user 记忆发布版本及其不可变副本。
+  // 读取当前跨项目全局记忆发布版本及其不可变副本。
   public getGlobalVersion(): {
     version: number;
     memories: import("@pi-harness/memory").MemoryRecord[];
@@ -274,7 +274,7 @@ export class SqliteDreamingRepository {
         const duplicate = this.database
           .prepare(
             `SELECT id FROM memories
-             WHERE scope = 'user' AND workspace_id IS NULL AND status = 'saved'
+             WHERE scope = 'global' AND workspace_id IS NULL AND status = 'saved'
                AND normalized_content = ? AND id <> ?`,
           )
           .get(normalized, change.memoryId);
@@ -283,8 +283,8 @@ export class SqliteDreamingRepository {
         if (change.expectedRevision === null) {
           this.database
             .prepare(`INSERT INTO memories
-            (id, content, normalized_content, profile_facet, scope, workspace_id, status, source_type, source_session_id, revision, created_at, updated_at)
-            VALUES (?, ?, ?, NULL, 'user', NULL, 'saved', 'session', ?, 1, ?, ?)`)
+            (id, content, normalized_content, scope, workspace_id, status, source_type, source_session_id, revision, created_at, updated_at)
+            VALUES (?, ?, ?, 'global', NULL, 'saved', 'session', ?, 1, ?, ?)`)
             .run(
               change.memoryId,
               content,
@@ -295,7 +295,9 @@ export class SqliteDreamingRepository {
             );
         } else {
           const current = this.database
-            .prepare("SELECT * FROM memories WHERE id = ? AND scope = 'user' AND status = 'saved'")
+            .prepare(
+              "SELECT * FROM memories WHERE id = ? AND scope = 'global' AND status = 'saved'",
+            )
             .get(change.memoryId);
           if (!current || current.revision !== change.expectedRevision)
             throw new Error("Global memory revision conflict");
@@ -324,7 +326,7 @@ export class SqliteDreamingRepository {
           if (revision === change.expectedRevision) continue;
           this.database
             .prepare(
-              "UPDATE memories SET content = ?, normalized_content = ?, profile_facet = NULL, revision = ?, updated_at = ? WHERE id = ?",
+              "UPDATE memories SET content = ?, normalized_content = ?, revision = ?, updated_at = ? WHERE id = ?",
             )
             .run(content, normalized, revision, input.now, change.memoryId);
           this.database
@@ -515,7 +517,7 @@ export class SqliteDreamingRepository {
           return null;
         }
       }
-      const provisionalMemories = this.listWorkspacePendingProvisionalMemories(workspaceId);
+      const provisionalMemories = this.listWorkspaceProvisionalMemories(workspaceId);
       this.database.exec("COMMIT");
       return provisionalMemories;
     } catch (error: unknown) {
@@ -801,8 +803,8 @@ export class SqliteDreamingRepository {
     if (created) {
       this.database
         .prepare(`INSERT INTO memories
-        (id, content, normalized_content, profile_facet, scope, workspace_id, status, source_type, source_session_id, revision, created_at, updated_at)
-        VALUES (?, ?, ?, NULL, 'workspace', ?, 'saved', 'session', ?, 1, ?, ?)`)
+        (id, content, normalized_content, scope, workspace_id, status, source_type, source_session_id, revision, created_at, updated_at)
+        VALUES (?, ?, ?, 'workspace', ?, 'saved', 'session', ?, 1, ?, ?)`)
         .run(
           change.memoryId,
           content,

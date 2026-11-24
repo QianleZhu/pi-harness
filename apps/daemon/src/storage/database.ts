@@ -361,20 +361,36 @@ function runMigrations(database: DatabaseSync): void {
       continue;
     }
 
-    // migration 与版本记录在同一事务中提交。失败后可在 daemon 下次启动时安全重试，
-    // 避免数据库结构停留在只完成一部分的状态。
-    database.exec("BEGIN IMMEDIATE");
+    // 重建含外键引用的表时必须在事务外临时关闭 foreign_keys，提交前执行完整性校验并恢复。
+    if (migration.disableForeignKeys) {
+      database.exec("PRAGMA foreign_keys = OFF");
+    }
     try {
-      if ("sql" in migration) {
-        database.exec(migration.sql);
-      } else {
-        migration.migrate(database);
+      // migration 与版本记录在同一事务中提交。失败后可在 daemon 下次启动时安全重试，
+      // 避免数据库结构停留在只完成一部分的状态。
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        if ("sql" in migration) {
+          database.exec(migration.sql);
+        } else {
+          migration.migrate(database);
+        }
+        if (migration.disableForeignKeys) {
+          const violations = database.prepare("PRAGMA foreign_key_check").all();
+          if (violations.length > 0) {
+            throw new Error(`Migration ${migration.version} failed foreign key integrity check`);
+          }
+        }
+        recordMigration.run(migration.version, Date.now());
+        database.exec("COMMIT");
+      } catch (error: unknown) {
+        database.exec("ROLLBACK");
+        throw error;
       }
-      recordMigration.run(migration.version, Date.now());
-      database.exec("COMMIT");
-    } catch (error: unknown) {
-      database.exec("ROLLBACK");
-      throw error;
+    } finally {
+      if (migration.disableForeignKeys) {
+        database.exec("PRAGMA foreign_keys = ON");
+      }
     }
   }
 }

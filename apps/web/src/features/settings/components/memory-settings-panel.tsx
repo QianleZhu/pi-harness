@@ -1,6 +1,6 @@
 "use client";
 
-import { Gear, Globe, Person, Plus, TrashBin } from "@gravity-ui/icons";
+import { ArrowRotateRight, Gear, Globe, Person, Plus, TrashBin } from "@gravity-ui/icons";
 import {
   Alert,
   AlertDialog,
@@ -13,16 +13,21 @@ import {
   toast,
 } from "@heroui/react";
 import {
+  MemoryErrorCode,
   type MemoryRecord,
   MemorySourceType,
   type UserProfileItem,
 } from "@pi-harness/memory/contract";
 import { useState } from "react";
+import { ApiRequestError } from "../../../api/request";
 import { formatChatTimestamp } from "../../../shared/utils/format-chat-timestamp";
 import { getMemoryProfileFacetLabel } from "../constants/memory-profile";
 import { useMemories } from "../hooks/use-memories";
-import { MemoryEditorDialog, type MemoryEditorTarget } from "./memory-editor-dialog";
-import type { MemoryWorkspaceOption } from "./memory-scope-select";
+import {
+  MemoryEditorDialog,
+  type MemoryEditorFeedback,
+  type MemoryEditorTarget,
+} from "./memory-editor-dialog";
 import { SettingsCatalogItem } from "./settings-catalog-item";
 import { SettingsFilterTabs } from "./settings-filter-tabs";
 import { SettingsPanelHeader } from "./settings-panel-header";
@@ -44,16 +49,27 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "记忆操作失败";
 }
 
-export function MemorySettingsPanel({
-  workspaces: _workspaces,
-}: {
-  workspaces: readonly MemoryWorkspaceOption[];
-}) {
+function isMemoryConflictError(error: unknown): boolean {
+  return error instanceof ApiRequestError && error.code === MemoryErrorCode.CONFLICT;
+}
+
+function isFormValidationError(error: unknown): boolean {
+  return (
+    error instanceof ApiRequestError &&
+    (error.code === MemoryErrorCode.DUPLICATE || error.code === MemoryErrorCode.INVALID)
+  );
+}
+
+export function MemorySettingsPanel() {
   const memory = useMemories();
   const [view, setView] = useState<string>(MemoryView.PROFILE);
   const [search, setSearch] = useState("");
   const [editor, setEditor] = useState<MemoryEditorTarget | null>(null);
+  const [editorFeedback, setEditorFeedback] = useState<MemoryEditorFeedback | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [deleteConflict, setDeleteConflict] = useState<string | null>(null);
+  const [isRefreshingConflict, setIsRefreshingConflict] = useState(false);
+
   const memories = memory.query.data?.memories ?? [];
   const profile = memory.query.data?.profile;
   const settings = memory.query.data?.settings;
@@ -79,9 +95,66 @@ export function MemorySettingsPanel({
       ? profileSections.reduce((sum, section) => sum + section.items.length, 0)
       : visibleGlobal.length;
 
-  const refreshAfterError = (error: unknown) => {
+  const notifyUnexpectedError = (error: unknown) => {
     toast.danger(errorMessage(error));
-    void memory.query.refetch();
+  };
+
+  const openEditor = (next: MemoryEditorTarget) => {
+    setEditorFeedback(null);
+    setEditor(next);
+  };
+
+  const closeEditor = () => {
+    setEditorFeedback(null);
+    setEditor(null);
+  };
+
+  const closeDeleteDialog = () => {
+    setDeleteConflict(null);
+    setDeleteTarget(null);
+  };
+
+  // 用户手动点击刷新后才拉取最新版本并更新编辑框，避免自动覆写用户正在输入的新内容。
+  const handleManualRefreshEditor = async () => {
+    if (editor?.kind !== "global" || !editor.entry) return;
+    setIsRefreshingConflict(true);
+    try {
+      const result = await memory.query.refetch();
+      const latest = result.data?.memories.find((item) => item.id === editor.entry?.id);
+      if (!latest) {
+        closeEditor();
+        toast.warning("该全局记忆已被移除");
+        return;
+      }
+      setEditor({ kind: "global", entry: latest });
+      setEditorFeedback(null);
+      toast.success("已刷新为最新内容");
+    } catch (error: unknown) {
+      notifyUnexpectedError(error);
+    } finally {
+      setIsRefreshingConflict(false);
+    }
+  };
+
+  const handleManualRefreshDelete = async () => {
+    if (deleteTarget?.kind !== "global") return;
+    setIsRefreshingConflict(true);
+    try {
+      const result = await memory.query.refetch();
+      const latest = result.data?.memories.find((item) => item.id === deleteTarget.entry.id);
+      if (!latest) {
+        closeDeleteDialog();
+        toast.warning("该全局记忆已被移除");
+        return;
+      }
+      setDeleteTarget({ kind: "global", entry: latest });
+      setDeleteConflict(null);
+      toast.success("已刷新为最新内容");
+    } catch (error: unknown) {
+      notifyUnexpectedError(error);
+    } finally {
+      setIsRefreshingConflict(false);
+    }
   };
 
   const renderProfileItem = (item: UserProfileItem) => {
@@ -92,7 +165,7 @@ export function MemorySettingsPanel({
         ariaLabel={`编辑用户个性：${item.content}`}
         name={item.content}
         icon={<Person aria-hidden className="size-5 text-muted" />}
-        onPress={() => setEditor({ kind: "profile", entry: item })}
+        onPress={() => openEditor({ kind: "profile", entry: item })}
         secondary={
           <span className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
             {facetLabel ? <span>{facetLabel}</span> : null}
@@ -108,7 +181,10 @@ export function MemorySettingsPanel({
               variant="ghost"
               className="text-muted data-[hovered]:text-danger"
               aria-label={`删除用户个性：${item.content}`}
-              onPress={() => setDeleteTarget({ kind: "profile", entry: item })}
+              onPress={() => {
+                setDeleteConflict(null);
+                setDeleteTarget({ kind: "profile", entry: item });
+              }}
             >
               <TrashBin aria-hidden className="size-4" />
             </Button>
@@ -126,7 +202,7 @@ export function MemorySettingsPanel({
         ariaLabel={`编辑全局记忆：${entry.content}`}
         name={entry.content}
         icon={<Globe aria-hidden className="size-5 text-muted" />}
-        onPress={() => setEditor({ kind: "global", entry })}
+        onPress={() => openEditor({ kind: "global", entry })}
         secondary={
           <span className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
             <span>全局 · 跨项目经验</span>
@@ -142,7 +218,10 @@ export function MemorySettingsPanel({
               variant="ghost"
               className="text-muted data-[hovered]:text-danger"
               aria-label={`删除全局记忆：${entry.content}`}
-              onPress={() => setDeleteTarget({ kind: "global", entry })}
+              onPress={() => {
+                setDeleteConflict(null);
+                setDeleteTarget({ kind: "global", entry });
+              }}
             >
               <TrashBin aria-hidden className="size-4" />
             </Button>
@@ -153,11 +232,15 @@ export function MemorySettingsPanel({
     );
   };
 
+  const editorKey = editor
+    ? `${editor.kind}:${editor.entry?.id ?? "new"}:${editor.kind === "global" ? (editor.entry?.revision ?? 0) : (editor.entry?.updatedAt ?? 0)}`
+    : "closed";
+
   return (
     <section aria-label="记忆设置" className="w-full max-w-[720px]">
       <SettingsPanelHeader
         title="记忆"
-        description="管理用户画像、个人偏好和项目背景。"
+        description="管理用户个性与跨项目全局记忆。"
         action={
           <div className="flex items-center gap-2">
             <Popover>
@@ -178,8 +261,8 @@ export function MemorySettingsPanel({
                         <p className="text-sm font-medium text-foreground">使用记忆</p>
                         <p className="mt-1 text-xs text-muted">
                           {settings?.useMemories
-                            ? "在对话中参考已保存的记忆。"
-                            : "已暂停使用，仍可查看和管理记忆。"}
+                            ? "在对话中参考已保存的用户个性、全局与工作区记忆。"
+                            : "已暂停使用，仍可在此查看和管理用户个性与全局记忆。"}
                         </p>
                       </div>
                       <Switch
@@ -188,7 +271,7 @@ export function MemorySettingsPanel({
                         isDisabled={!settings || memory.isSavingSettings}
                         isSelected={settings?.useMemories ?? false}
                         onChange={(useMemories) => {
-                          void memory.updateSettings({ useMemories }).catch(refreshAfterError);
+                          void memory.updateSettings({ useMemories }).catch(notifyUnexpectedError);
                         }}
                       >
                         <Switch.Content>
@@ -204,7 +287,7 @@ export function MemorySettingsPanel({
                         <p className="mt-1 text-xs text-muted">
                           {settings?.generateMemories
                             ? "允许在对话中记录暂存记忆并由 Dreaming 后台整理。"
-                            : "已暂停生成记忆，正在进行的整理不受影响。"}
+                            : "已暂停生成记忆，正在进行的操作完成后生效于下一次。"}
                         </p>
                       </div>
                       <Switch
@@ -213,7 +296,9 @@ export function MemorySettingsPanel({
                         isDisabled={!settings || memory.isSavingSettings}
                         isSelected={settings?.generateMemories ?? false}
                         onChange={(generateMemories) => {
-                          void memory.updateSettings({ generateMemories }).catch(refreshAfterError);
+                          void memory
+                            .updateSettings({ generateMemories })
+                            .catch(notifyUnexpectedError);
                         }}
                       >
                         <Switch.Content>
@@ -236,7 +321,7 @@ export function MemorySettingsPanel({
               variant="secondary"
               isDisabled={memory.query.isPending}
               onPress={() =>
-                setEditor({
+                openEditor({
                   kind: view === MemoryView.PROFILE ? "profile" : "global",
                   entry: null,
                 })
@@ -338,12 +423,18 @@ export function MemorySettingsPanel({
       </div>
       {editor ? (
         <MemoryEditorDialog
+          key={editorKey}
           target={editor}
+          feedback={editorFeedback}
+          isRefreshing={isRefreshingConflict}
           isSaving={
             memory.isCreating || (editor.entry !== null && memory.isUpdating === editor.entry.id)
           }
-          onClose={() => setEditor(null)}
+          onClearFeedback={() => setEditorFeedback(null)}
+          onRefreshConflict={handleManualRefreshEditor}
+          onClose={closeEditor}
           onSave={async (payload) => {
+            setEditorFeedback(null);
             try {
               if (payload.kind === "profile") {
                 if (editor.kind === "profile" && editor.entry) {
@@ -365,10 +456,19 @@ export function MemorySettingsPanel({
               } else {
                 await memory.create({ content: payload.content });
               }
-              setEditor(null);
+              closeEditor();
               toast.success("已保存");
             } catch (error: unknown) {
-              refreshAfterError(error);
+              if (isMemoryConflictError(error)) {
+                // 保留用户当前表单输入，不自动刷新覆盖；提示用户手动点击刷新。
+                setEditorFeedback({ kind: "conflict", message: errorMessage(error) });
+                return;
+              }
+              if (isFormValidationError(error)) {
+                setEditorFeedback({ kind: "error", message: errorMessage(error) });
+                return;
+              }
+              notifyUnexpectedError(error);
             }
           }}
         />
@@ -376,11 +476,11 @@ export function MemorySettingsPanel({
       <AlertDialog.Backdrop
         isOpen={deleteTarget !== null}
         onOpenChange={(open) => {
-          if (!open && !memory.isDeleting) setDeleteTarget(null);
+          if (!open && !memory.isDeleting && !isRefreshingConflict) closeDeleteDialog();
         }}
       >
         <AlertDialog.Container>
-          <AlertDialog.Dialog className="sm:max-w-[420px]">
+          <AlertDialog.Dialog className="sm:max-w-[440px]">
             <AlertDialog.Header>
               <AlertDialog.Icon status="warning" />
               <AlertDialog.Heading>
@@ -390,30 +490,61 @@ export function MemorySettingsPanel({
             <AlertDialog.Body>
               <p className="break-words">{deleteTarget?.entry.content}</p>
               <p className="mt-3 text-sm text-muted">删除后，此内容将从记忆库中移除。</p>
+              {deleteConflict ? (
+                <Alert className="mt-3" status="warning">
+                  <Alert.Indicator />
+                  <Alert.Content>
+                    <Alert.Title>内容已在后台更新，请刷新</Alert.Title>
+                    <Alert.Description>
+                      {deleteConflict}。请手动刷新查看最新内容后再决定是否移除。
+                    </Alert.Description>
+                    <div className="mt-2">
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        isPending={isRefreshingConflict}
+                        isDisabled={memory.isDeleting !== null}
+                        onPress={() => void handleManualRefreshDelete()}
+                      >
+                        <ArrowRotateRight aria-hidden className="size-4" />
+                        刷新最新内容
+                      </Button>
+                    </div>
+                  </Alert.Content>
+                </Alert>
+              ) : null}
             </AlertDialog.Body>
             <AlertDialog.Footer>
               <Button
                 variant="tertiary"
-                isDisabled={memory.isDeleting !== null}
-                onPress={() => setDeleteTarget(null)}
+                isDisabled={memory.isDeleting !== null || isRefreshingConflict}
+                onPress={closeDeleteDialog}
               >
                 取消
               </Button>
               <Button
                 variant="danger"
+                isDisabled={deleteConflict !== null || isRefreshingConflict}
                 isPending={deleteTarget !== null && memory.isDeleting === deleteTarget.entry.id}
                 onPress={() => {
                   if (!deleteTarget) return;
+                  setDeleteConflict(null);
                   const task =
                     deleteTarget.kind === "profile"
                       ? memory.removeProfile(deleteTarget.entry.id)
                       : memory.remove(deleteTarget.entry.id, deleteTarget.entry.revision);
                   void task
                     .then(() => {
-                      setDeleteTarget(null);
+                      closeDeleteDialog();
                       toast.success("已移除");
                     })
-                    .catch(refreshAfterError);
+                    .catch((error: unknown) => {
+                      if (isMemoryConflictError(error)) {
+                        setDeleteConflict(errorMessage(error));
+                        return;
+                      }
+                      notifyUnexpectedError(error);
+                    });
                 }}
               >
                 确认移除

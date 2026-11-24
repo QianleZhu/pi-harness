@@ -4,8 +4,8 @@ import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
 export type DatabaseMigration =
-  | { sql: string; version: string }
-  | { migrate: (database: DatabaseSync) => void; version: string };
+  | { disableForeignKeys?: boolean; sql: string; version: string }
+  | { disableForeignKeys?: boolean; migrate: (database: DatabaseSync) => void; version: string };
 
 // 迁移时使用的旧版注入上下文默认值；已执行的 migration 不随后续常量调整。
 const LEGACY_MEMORY_CONTEXT = "# 注入上下文\n\n导航：[索引](index.md)\n";
@@ -781,6 +781,66 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
         )), '[]'),
         CAST(strftime('%s', 'now') AS INTEGER) * 1000
       FROM memories WHERE scope = 'user' AND status = 'saved';
+    `,
+  },
+  {
+    version: "034-global-memory-scope.sql",
+    disableForeignKeys: true,
+    sql: `
+      CREATE TABLE memories_new (
+        id TEXT PRIMARY KEY,
+        content TEXT NOT NULL,
+        normalized_content TEXT NOT NULL,
+        scope TEXT NOT NULL CHECK (scope IN ('global', 'workspace')),
+        workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+        status TEXT NOT NULL CHECK (status IN ('saved', 'deleted')),
+        source_type TEXT NOT NULL CHECK (source_type IN ('manual', 'session')),
+        source_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        CHECK (
+          (scope = 'global' AND workspace_id IS NULL)
+          OR (scope = 'workspace' AND workspace_id IS NOT NULL)
+        )
+      ) STRICT;
+
+      INSERT INTO memories_new (
+        id, content, normalized_content, scope, workspace_id, status,
+        source_type, source_session_id, revision, created_at, updated_at
+      )
+      SELECT
+        id,
+        content,
+        normalized_content,
+        CASE WHEN scope = 'user' THEN 'global' ELSE scope END,
+        workspace_id,
+        CASE WHEN status = 'suggested' THEN 'deleted' ELSE status END,
+        source_type,
+        source_session_id,
+        revision,
+        created_at,
+        updated_at
+      FROM memories;
+
+      DROP TABLE memories;
+      ALTER TABLE memories_new RENAME TO memories;
+
+      CREATE UNIQUE INDEX memories_scope_content_idx
+        ON memories(scope, COALESCE(workspace_id, ''), normalized_content)
+        WHERE status = 'saved';
+      CREATE INDEX memories_visibility_idx
+        ON memories(status, scope, workspace_id, updated_at DESC);
+
+      INSERT INTO global_memory_versions (version, memories_json, created_at)
+      SELECT (SELECT COALESCE(MAX(version), 0) + 1 FROM global_memory_versions),
+        COALESCE(json_group_array(json_object(
+          'id', id, 'content', content, 'scope', scope, 'workspaceId', workspace_id,
+          'sourceType', source_type, 'sourceSessionId', source_session_id,
+          'revision', revision, 'createdAt', created_at, 'updatedAt', updated_at
+        )), '[]'),
+        CAST(strftime('%s', 'now') AS INTEGER) * 1000
+      FROM memories WHERE scope = 'global' AND status = 'saved';
     `,
   },
 ];

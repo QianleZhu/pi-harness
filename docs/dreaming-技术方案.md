@@ -180,7 +180,7 @@ SQLite 表：
 
 - `user_profiles`：用户个性独立表，仅由用户在 Web UI 手动维护，不参与 Dreaming 与 `global_memory_versions`；
 - `provisional_memories`：工作区在线暂存表（Append-Only，按 `workspace_id`、`session_id`、`run_id`、`status` 管理）；
-- `memories`：当前有效长期记忆（`scope = 'user'` 仅保存跨项目全局记忆，`scope = 'workspace'` 仅由 Dreaming 维护）；
+- `memories`：当前长期记忆（`scope = 'global'` 仅保存跨项目全局记忆，`scope = 'workspace'` 仅由 Dreaming 维护；全局删除使用 `status = 'deleted'` 逻辑保留历史快照引用）；
 - `memory_revisions`：按记忆 ID 和版本保存正文、适用条件与证据状态；
 - `memory_revision_sources`：关联记忆版本与 Session、Run、事件 ID 和序号；
 - `dreaming_wiki`：workspace 当前发布 Wiki 目录指针；

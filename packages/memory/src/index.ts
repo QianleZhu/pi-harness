@@ -6,7 +6,6 @@ export {
   type MemoryEmbedder,
   type MemoryEmbedding,
   MemoryError,
-  MemoryErrorCode,
   type MemoryRecorder,
   type MemoryRepository,
   type MemoryRuntime,

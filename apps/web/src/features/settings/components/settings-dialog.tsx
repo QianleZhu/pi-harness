@@ -692,7 +692,7 @@ export function SettingsDialog({
                 ) : activeSectionId === "usage" ? (
                   <UsageSettingsPanel />
                 ) : activeSectionId === "memory" ? (
-                  <MemorySettingsPanel workspaces={workspaces} />
+                  <MemorySettingsPanel />
                 ) : activeSectionId === "plugins" ? (
                   <PluginMarketplacePanel />
                 ) : activeSectionId === "mcp" ? (

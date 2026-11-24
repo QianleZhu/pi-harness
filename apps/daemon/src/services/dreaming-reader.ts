@@ -119,7 +119,7 @@ export class DreamingReaderService implements DreamingReader {
       snapshot?.globalMemories?.find((item) => item.id === memoryId) ??
       snapshot?.workspaceMemories?.find((item) => item.id === memoryId) ??
       this.memories.find(memoryId);
-    if (!memory || (memory.scope !== MemoryScope.USER && memory.workspaceId !== workspaceId))
+    if (!memory || (memory.scope !== MemoryScope.GLOBAL && memory.workspaceId !== workspaceId))
       throw new Error("Memory not found");
     const version = this.dreaming.findRevision(memoryId, revision);
     if (!version && memory.revision !== revision) throw new Error("Memory revision not found");
@@ -151,7 +151,7 @@ export class DreamingReaderService implements DreamingReader {
     if (
       !source ||
       !memory ||
-      (memory.scope !== MemoryScope.USER &&
+      (memory.scope !== MemoryScope.GLOBAL &&
         this.sessions.find(sessionId)?.workspaceId !== workspaceId)
     )
       throw new Error("Memory source not found");

@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import {
   type CreateMemoryInput,
   type CreateUserProfileInput,
+  MemoryErrorCode,
+  type MemoryErrorCode as MemoryErrorCodeValue,
   type MemoryRecord,
   MemoryScope,
   type MemoryScope as MemoryScopeValue,
@@ -23,20 +25,9 @@ import {
   searchOverflowProvisionalMemories,
 } from "./utils/provisional-context.js";
 
-export const MemoryErrorCode = {
-  CONFLICT: "MEMORY_CONFLICT",
-  DUPLICATE: "MEMORY_DUPLICATE",
-  EMBEDDING_FAILED: "MEMORY_EMBEDDING_FAILED",
-  INVALID: "MEMORY_INVALID",
-  LEARNING_DISABLED: "MEMORY_LEARNING_DISABLED",
-  NOT_FOUND: "MEMORY_NOT_FOUND",
-  WORKSPACE_NOT_FOUND: "MEMORY_WORKSPACE_NOT_FOUND",
-} as const;
-export type MemoryErrorCode = (typeof MemoryErrorCode)[keyof typeof MemoryErrorCode];
-
 export class MemoryError extends Error {
   public constructor(
-    public readonly code: MemoryErrorCode,
+    public readonly code: MemoryErrorCodeValue,
     message: string,
   ) {
     super(message);
@@ -357,7 +348,7 @@ export class MemoryService implements MemoryRuntime {
   public getState(): MemoryState {
     const globalMemories = this.repository
       .list()
-      .filter((memory) => memory.scope === MemoryScope.USER);
+      .filter((memory) => memory.scope === MemoryScope.GLOBAL);
     const profiles = this.userProfiles?.list() ?? [];
     return {
       memories: globalMemories,
@@ -438,13 +429,13 @@ export class MemoryService implements MemoryRuntime {
     }
   }
 
-  // Web API 手动创建的记忆固定为跨项目全局记忆（scope='user'）。
+  // Web API 手动创建的记忆固定为跨项目全局记忆（scope='global'）。
   public createManual(input: CreateMemoryInput, signal?: AbortSignal): Promise<MemoryRecord> {
     return this.withMutation(() =>
       this.create(
         {
           content: input.content,
-          scope: MemoryScope.USER,
+          scope: MemoryScope.GLOBAL,
           sourceSessionId: null,
           sourceType: SourceType.MANUAL,
           workspaceId: null,
@@ -469,7 +460,7 @@ export class MemoryService implements MemoryRuntime {
   ): Promise<MemoryRecord> {
     const current = this.repository.find(memoryId);
     if (!current) throw new MemoryError(MemoryErrorCode.NOT_FOUND, "记忆不存在");
-    if (current.scope !== MemoryScope.USER) {
+    if (current.scope !== MemoryScope.GLOBAL) {
       throw new MemoryError(
         MemoryErrorCode.INVALID,
         "工作区记忆仅由 Dreaming 自动维护，不支持手动修改",
@@ -481,7 +472,7 @@ export class MemoryService implements MemoryRuntime {
     const content = normalizeContent(input.content);
     const duplicate = this.repository.findDuplicate(
       content.normalized,
-      MemoryScope.USER,
+      MemoryScope.GLOBAL,
       null,
       memoryId,
     );
@@ -491,7 +482,7 @@ export class MemoryService implements MemoryRuntime {
       content: content.content,
       normalizedContent: content.normalized,
       revision: current.revision + 1,
-      scope: MemoryScope.USER,
+      scope: MemoryScope.GLOBAL,
       updatedAt: Date.now(),
       workspaceId: null,
     };
@@ -521,7 +512,7 @@ export class MemoryService implements MemoryRuntime {
   private deleteUnlocked(memoryId: string, expectedRevision: number): void {
     const current = this.repository.find(memoryId);
     if (!current) throw new MemoryError(MemoryErrorCode.NOT_FOUND, "记忆不存在");
-    if (current.scope !== MemoryScope.USER) {
+    if (current.scope !== MemoryScope.GLOBAL) {
       throw new MemoryError(
         MemoryErrorCode.INVALID,
         "工作区记忆仅由 Dreaming 自动维护，不支持手动删除",
@@ -685,7 +676,7 @@ export class MemoryService implements MemoryRuntime {
     signal?: AbortSignal,
   ): Promise<MemoryRecord> {
     const content = normalizeContent(input.content);
-    const workspaceId = input.scope === MemoryScope.USER ? null : input.workspaceId;
+    const workspaceId = input.scope === MemoryScope.GLOBAL ? null : input.workspaceId;
     if (input.scope === MemoryScope.WORKSPACE && !workspaceId) {
       throw new MemoryError(MemoryErrorCode.INVALID, "项目记忆必须指定 Workspace");
     }

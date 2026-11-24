@@ -45,7 +45,7 @@ function requiredInteger(row: MemoryRow, key: string): number {
 function mapMemory(row: MemoryRow): MemoryRecord {
   const scope = requiredString(row, "scope");
   const sourceType = requiredString(row, "source_type");
-  if (scope !== MemoryScope.USER && scope !== MemoryScope.WORKSPACE) {
+  if (scope !== MemoryScope.GLOBAL && scope !== MemoryScope.WORKSPACE) {
     throw new Error("Invalid memory scope");
   }
   if (sourceType !== MemorySourceType.MANUAL && sourceType !== MemorySourceType.SESSION) {
@@ -95,9 +95,9 @@ export class SqliteMemoryRepository implements MemoryRepository {
       this.database
         .prepare(
           `INSERT INTO memories (
-             id, content, normalized_content, profile_facet, scope, workspace_id, status,
+             id, content, normalized_content, scope, workspace_id, status,
              source_type, source_session_id, revision, created_at, updated_at
-           ) VALUES (?, ?, ?, NULL, ?, ?, 'saved', ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, 'saved', ?, ?, ?, ?, ?)`,
         )
         .run(
           memory.id,
@@ -127,7 +127,7 @@ export class SqliteMemoryRepository implements MemoryRepository {
           SELECT memory_id, memory_revision, model_id, dimensions, embedding FROM memory_embeddings
           WHERE memory_id = ? AND memory_revision = ?`)
         .run(memory.id, memory.revision);
-      if (memory.scope === MemoryScope.USER)
+      if (memory.scope === MemoryScope.GLOBAL)
         recordGlobalMemoryVersion(this.database, memory.updatedAt);
       this.database.exec("COMMIT");
     } catch (error: unknown) {
@@ -142,12 +142,12 @@ export class SqliteMemoryRepository implements MemoryRepository {
       const current = this.database
         .prepare("SELECT scope FROM memories WHERE id = ? AND revision = ?")
         .get(memoryId, expectedRevision);
-      // 全局旧版本仍可能被运行中的快照引用，隐藏当前记录并保留其来源。
+      // 全局旧版本仍可能被运行中的快照引用，逻辑删除（status='deleted'）并保留历史版本与来源。
       const deleted =
-        current?.scope === MemoryScope.USER
+        current?.scope === MemoryScope.GLOBAL
           ? this.database
               .prepare(
-                "UPDATE memories SET status = 'suggested' WHERE id = ? AND revision = ? AND status = 'saved'",
+                "UPDATE memories SET status = 'deleted' WHERE id = ? AND revision = ? AND status = 'saved'",
               )
               .run(memoryId, expectedRevision).changes === 1
           : this.database
@@ -155,7 +155,7 @@ export class SqliteMemoryRepository implements MemoryRepository {
               .run(memoryId, expectedRevision).changes === 1;
       if (deleted) {
         this.database.prepare("DELETE FROM memory_search WHERE memory_id = ?").run(memoryId);
-        if (current?.scope === MemoryScope.USER)
+        if (current?.scope === MemoryScope.GLOBAL)
           recordGlobalMemoryVersion(this.database, Date.now());
       }
       this.database.exec("COMMIT");
@@ -252,7 +252,7 @@ export class SqliteMemoryRepository implements MemoryRepository {
          FROM memories
          JOIN memory_embeddings ON memory_embeddings.memory_id = memories.id
          WHERE memories.status = 'saved'
-           AND (memories.scope = 'user' OR memories.workspace_id = ?)
+           AND (memories.scope = 'global' OR memories.workspace_id = ?)
            AND memory_embeddings.model_id = ?
            AND memory_embeddings.memory_revision = memories.revision
          ORDER BY memories.updated_at DESC, memories.id`,
@@ -277,7 +277,7 @@ export class SqliteMemoryRepository implements MemoryRepository {
       const row = this.database
         .prepare(`SELECT m.*, r.content AS version_content, r.created_at AS version_updated_at FROM memories m
         LEFT JOIN memory_revisions r ON r.memory_id = m.id AND r.revision = ?
-        WHERE m.id = ? AND (m.scope = 'user' OR m.workspace_id = ?)`)
+        WHERE m.id = ? AND (m.scope = 'global' OR m.workspace_id = ?)`)
         .get(revision, id, workspaceId);
       if (!row) continue;
       const memory = mapMemory(row);
@@ -397,7 +397,7 @@ export class SqliteMemoryRepository implements MemoryRepository {
       return this.database
         .prepare(
           `SELECT * FROM memories
-           WHERE status = 'saved' AND (scope = 'user' OR workspace_id = ?)
+           WHERE status = 'saved' AND (scope = 'global' OR workspace_id = ?)
              AND normalized_content LIKE ? ESCAPE '\\'
            ORDER BY updated_at DESC, id
            LIMIT ?`,
@@ -423,7 +423,7 @@ export class SqliteMemoryRepository implements MemoryRepository {
          JOIN memories ON memories.id = memory_search.memory_id
          WHERE memory_search MATCH ?
            AND memories.status = 'saved'
-           AND (memories.scope = 'user' OR memories.workspace_id = ?)
+           AND (memories.scope = 'global' OR memories.workspace_id = ?)
          ORDER BY bm25(memory_search), memories.updated_at DESC
          LIMIT ?`,
       )
@@ -468,7 +468,7 @@ export class SqliteMemoryRepository implements MemoryRepository {
         this.database
           .prepare(
             `UPDATE memories SET
-               content = ?, normalized_content = ?, profile_facet = NULL, scope = ?, workspace_id = ?,
+               content = ?, normalized_content = ?, scope = ?, workspace_id = ?,
                revision = ?, updated_at = ?
              WHERE id = ? AND revision = ?`,
           )
@@ -528,7 +528,7 @@ export class SqliteMemoryRepository implements MemoryRepository {
             SELECT memory_id, memory_revision, model_id, dimensions, embedding FROM memory_embeddings
             WHERE memory_id = ? AND memory_revision = ?`)
           .run(memory.id, memory.revision);
-        if (previous?.scope === MemoryScope.USER || memory.scope === MemoryScope.USER)
+        if (previous?.scope === MemoryScope.GLOBAL || memory.scope === MemoryScope.GLOBAL)
           recordGlobalMemoryVersion(this.database, memory.updatedAt);
       }
       this.database.exec("COMMIT");

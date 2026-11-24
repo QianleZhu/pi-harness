@@ -38,14 +38,15 @@
 - [x] 改造 `GlobalDreamingService` 与 `global-dreaming-tools.ts`：读取阶段记录 `baseVersion`，准备提交前比较版本号；不一致时基于 `global_memory_versions` 计算精确结构化 diff（新增、修改、删除），切换工具视图至最新版本并支持覆盖/撤销已有草案，由全局 Agent 以**用户修改权威更高**原则执行增量合并后再走乐观锁提交（设有限合并轮次）。
 - [x] 补齐 `publishGlobal` 向量写入（`memory_embeddings` 与 `memory_revision_embeddings`），并在主进程 `MemoryService` 写入事务内兜底跨进程 `UNIQUE` 冲突稳定映射为 `MEMORY_DUPLICATE`。
 - [x] 验证后台整理期间用户新增/修改/删除全局记忆触发精确 diff 增量合并（用户为准、防复活、可撤销草案）、合并上限退回、跨进程重复写入兜底、`pnpm typecheck` 与 `pnpm check`。
-- [ ] 用户人工代码阅读与校验（步骤 4）。
+- [x] 用户人工代码阅读与校验（步骤 4）。
 
-### 步骤 5：Web 设置页双分类改造与反向冲突手动刷新
+### 步骤 5：Web 设置页双分类改造、反向冲突手动刷新与全局语义统一
 
-- [ ] 改造 Web 记忆设置页：明确拆分为「用户个性」（手动 CRUD）与「全局记忆」（跨项目经验查看与 CRUD）两类，移除工作区记忆展示与编辑入口。
-- [ ] 实现反向并发冲突交互：编辑或删除全局记忆撞上 `MEMORY_CONFLICT` 时，保留用户当前表单输入不自动覆盖，展示清晰冲突提示并提供手动「刷新」按钮供用户自行拉取最新内容。
-- [ ] 验证 Web 构建、类型检查、Biome 检查与冲突交互逻辑。
-- [ ] 用户人工代码阅读与校验（步骤 5）。
+- [x] 将全局记忆作用域由 `scope = 'user'` 迁移为 `scope = 'global'`（新增显式迁移 `034-global-memory-scope.sql`，同步将全局记忆逻辑删除状态由 `'suggested'` 改为 `'deleted'`、移除 `memories.profile_facet` 遗留列并重建 `global_memory_versions`），全仓同步清理语义不清之处。
+- [x] 改造 Web 记忆设置页：明确拆分为「用户个性」（手动 CRUD）与「全局记忆」（跨项目经验查看与 CRUD）两类，移除工作区记忆展示、编辑入口与废弃的 `memory-scope-select.tsx`。
+- [x] 实现反向并发冲突交互：编辑或删除全局记忆撞上 `MEMORY_CONFLICT` 时，保留用户当前表单输入不自动覆盖，展示清晰冲突提示并提供手动「刷新最新内容」按钮供用户自行拉取最新内容。
+- [x] 验证迁移兼容性、Web 构建、类型检查、Biome 检查与冲突交互逻辑。
+- [x] 用户人工代码阅读与校验（步骤 5）。
 
 ## 统一整理 Agent（历史实现）
 
@@ -79,12 +80,12 @@
 
 ### 四层记忆存储
 
-| 层级 | 内容 | 存储位置 |
-| --- | --- | --- |
-| 注入上下文 | 核心摘要和导航入口 | 当前发布目录的 `context.md` |
-| 主题 Wiki 与导航 | 主题结论、适用条件和导航 | 当前发布目录的 `index.md` 和主题 Markdown 文件 |
-| 长期记忆摘要 | 当前摘要、Dreaming 版本及来源 | `memories`、`memory_revisions`、`memory_revision_sources` |
-| 会话事件 | 原始对话、Run 和工具事件 | `sessions/<sessionId>.jsonl` |
+| 层级             | 内容                          | 存储位置                                                  |
+| ---------------- | ----------------------------- | --------------------------------------------------------- |
+| 注入上下文       | 核心摘要和导航入口            | 当前发布目录的 `context.md`                               |
+| 主题 Wiki 与导航 | 主题结论、适用条件和导航      | 当前发布目录的 `index.md` 和主题 Markdown 文件            |
+| 长期记忆摘要     | 当前摘要、Dreaming 版本及来源 | `memories`、`memory_revisions`、`memory_revision_sources` |
+| 会话事件         | 原始对话、Run 和工具事件      | `sessions/<sessionId>.jsonl`                              |
 
 Wiki 位于 daemon 数据目录的 `dreaming/<workspaceId>/<directoryId>/`，`dreaming_wiki` 指向当前发布目录。Wiki 引用记忆 ID 和版本，来源关联定位 Session JSONL 中的事件。
 

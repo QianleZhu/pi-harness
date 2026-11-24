@@ -2,10 +2,22 @@ import { type Static, Type } from "typebox";
 
 // 记忆作用域
 export const MemoryScope = {
-  USER: "user", // 跨项目全局经验记忆
+  GLOBAL: "global", // 跨项目全局经验记忆
   WORKSPACE: "workspace", // 只属于某个 Workspace（仅由 Dreaming 维护）
 } as const;
 export type MemoryScope = (typeof MemoryScope)[keyof typeof MemoryScope];
+
+// 记忆业务错误码（供 daemon API 与 Web 前端共用，避免散落字符串）
+export const MemoryErrorCode = {
+  CONFLICT: "MEMORY_CONFLICT",
+  DUPLICATE: "MEMORY_DUPLICATE",
+  EMBEDDING_FAILED: "MEMORY_EMBEDDING_FAILED",
+  INVALID: "MEMORY_INVALID",
+  LEARNING_DISABLED: "MEMORY_LEARNING_DISABLED",
+  NOT_FOUND: "MEMORY_NOT_FOUND",
+  WORKSPACE_NOT_FOUND: "MEMORY_WORKSPACE_NOT_FOUND",
+} as const;
+export type MemoryErrorCode = (typeof MemoryErrorCode)[keyof typeof MemoryErrorCode];
 
 // 记忆来源类型
 export const MemorySourceType = {
@@ -26,7 +38,7 @@ export const UserProfileFacet = {
 export type UserProfileFacet = (typeof UserProfileFacet)[keyof typeof UserProfileFacet];
 
 export const MemoryScopeSchema = Type.Union([
-  Type.Literal(MemoryScope.USER),
+  Type.Literal(MemoryScope.GLOBAL),
   Type.Literal(MemoryScope.WORKSPACE),
 ]);
 export const MemorySourceTypeSchema = Type.Union([
@@ -52,13 +64,13 @@ export const UserProfileItemSchema = Type.Object({
 });
 export type UserProfileItem = Static<typeof UserProfileItemSchema>;
 
-// 一条长期记忆（scope='user' 仅存跨项目经验；scope='workspace' 仅由 Dreaming 维护）
+// 一条长期记忆（scope='global' 仅存跨项目经验；scope='workspace' 仅由 Dreaming 维护）
 export const MemoryRecordSchema = Type.Object({
   content: Type.String({ maxLength: 500, minLength: 1 }), // 记忆正文
   createdAt: Type.Integer({ minimum: 0 }), // 创建时间，Unix 毫秒时间戳
   id: Type.String({ format: "uuid" }), // 记忆唯一 ID
   revision: Type.Integer({ minimum: 1 }), // 修改版本号，用于防止并发覆盖
-  scope: MemoryScopeSchema, // user 为跨项目全局记忆，workspace 为项目记忆
+  scope: MemoryScopeSchema, // global 为跨项目全局记忆，workspace 为项目记忆
   sourceSessionId: Type.Union([Type.String({ format: "uuid" }), Type.Null()]), // 来源 Session，手动创建时为 null
   sourceType: MemorySourceTypeSchema, // manual 为手动创建，session 为对话整理产生
   updatedAt: Type.Integer({ minimum: 0 }), // 最后更新时间，Unix 毫秒时间戳

@@ -31,6 +31,13 @@ export { createDreamingTools } from "./tools/dreaming-tools.js";
 export { createGlobalDreamingTools } from "./tools/global-dreaming-tools.js";
 export { resolveDreamingRevision } from "./utils/dreaming-revision.js";
 export {
+  diffGlobalMemories,
+  type GlobalMemoryDiff,
+  type GlobalMemoryDiffAdded,
+  type GlobalMemoryDiffDeleted,
+  type GlobalMemoryDiffUpdated,
+} from "./utils/global-memory-diff.js";
+export {
   formatProvisionalMemoriesContext,
   searchOverflowProvisionalMemories,
 } from "./utils/provisional-context.js";

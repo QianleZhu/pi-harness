@@ -270,6 +270,15 @@ export class SqliteDreamingRepository {
         const content = change.content.trim().replaceAll(/\s+/g, " ");
         if (!content || content.length > 500 || !change.sources.length)
           throw new Error("Invalid global memory change");
+        const normalized = content.toLocaleLowerCase();
+        const duplicate = this.database
+          .prepare(
+            `SELECT id FROM memories
+             WHERE scope = 'user' AND workspace_id IS NULL AND status = 'saved'
+               AND normalized_content = ? AND id <> ?`,
+          )
+          .get(normalized, change.memoryId);
+        if (duplicate) throw new Error("Duplicate global memory content");
         let revision = 1;
         if (change.expectedRevision === null) {
           this.database
@@ -279,7 +288,7 @@ export class SqliteDreamingRepository {
             .run(
               change.memoryId,
               content,
-              content.toLocaleLowerCase(),
+              normalized,
               change.sources[0]?.sessionId ?? null,
               input.now,
               input.now,
@@ -317,7 +326,7 @@ export class SqliteDreamingRepository {
             .prepare(
               "UPDATE memories SET content = ?, normalized_content = ?, profile_facet = NULL, revision = ?, updated_at = ? WHERE id = ?",
             )
-            .run(content, content.toLocaleLowerCase(), revision, input.now, change.memoryId);
+            .run(content, normalized, revision, input.now, change.memoryId);
           this.database
             .prepare("DELETE FROM memory_search WHERE memory_id = ?")
             .run(change.memoryId);
@@ -329,6 +338,20 @@ export class SqliteDreamingRepository {
         this.database
           .prepare("INSERT INTO memory_search (memory_id, content) VALUES (?, ?)")
           .run(change.memoryId, content);
+        if (change.embedding) {
+          const embedding = change.embedding;
+          this.database
+            .prepare(`INSERT INTO memory_embeddings
+            (memory_id, model_id, dimensions, embedding, memory_revision, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
+            .run(
+              change.memoryId,
+              embedding.modelId,
+              embedding.dimensions,
+              new Uint8Array(Float32Array.from(embedding.values).buffer),
+              revision,
+              input.now,
+            );
+        }
         this.createRevision({
           memoryId: change.memoryId,
           revision,
@@ -337,6 +360,18 @@ export class SqliteDreamingRepository {
           evidenceStatus: change.evidenceStatus,
           createdAt: input.now,
         });
+        if (change.embedding) {
+          this.database
+            .prepare(`INSERT INTO memory_revision_embeddings
+            (memory_id, revision, model_id, dimensions, embedding) VALUES (?, ?, ?, ?, ?)`)
+            .run(
+              change.memoryId,
+              revision,
+              change.embedding.modelId,
+              change.embedding.dimensions,
+              new Uint8Array(Float32Array.from(change.embedding.values).buffer),
+            );
+        }
         if (change.expectedRevision !== null)
           this.database
             .prepare(`INSERT INTO memory_revision_sources

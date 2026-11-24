@@ -2,6 +2,8 @@ import { DatabaseSync } from "node:sqlite";
 import {
   getDefaultMemorySettings,
   type MemoryEmbedding,
+  MemoryError,
+  MemoryErrorCode,
   type MemoryRecord,
   type MemoryRepository,
   MemoryScope,
@@ -86,6 +88,10 @@ export class SqliteMemoryRepository implements MemoryRepository {
   public create(memory: StoredMemoryInput, embedding: MemoryEmbedding | null): void {
     this.database.exec("BEGIN IMMEDIATE");
     try {
+      // 跨进程异步生成 embedding 期间 Worker 可能写入了相同内容，在事务内复查并稳定映射为 DUPLICATE。
+      if (this.findDuplicate(memory.normalizedContent, memory.scope, memory.workspaceId)) {
+        throw new MemoryError(MemoryErrorCode.DUPLICATE, "已有相同作用范围的记忆");
+      }
       this.database
         .prepare(
           `INSERT INTO memories (
@@ -435,6 +441,16 @@ export class SqliteMemoryRepository implements MemoryRepository {
       const previous = this.database
         .prepare("SELECT scope, content FROM memories WHERE id = ? AND revision = ?")
         .get(memory.id, expectedRevision);
+      if (!previous) {
+        this.database.exec("COMMIT");
+        return false;
+      }
+      // 跨进程并发下在事务内复查唯一内容约束，避免异步 embedding 窗口期抛出裸 SQLite 唯一索引错误。
+      if (
+        this.findDuplicate(memory.normalizedContent, memory.scope, memory.workspaceId, memory.id)
+      ) {
+        throw new MemoryError(MemoryErrorCode.DUPLICATE, "已有相同的全局记忆");
+      }
       // 先保存旧内容及向量，确保已启动的 Run 继续读取固定版本。
       this.database
         .prepare(`INSERT OR IGNORE INTO memory_revisions

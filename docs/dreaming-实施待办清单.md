@@ -31,13 +31,13 @@
 - [x] 更新 `packages/memory` 契约与服务：拆分独立的用户个性读写契约（仅用户手动维护），全局记忆去掉 `profileFacet` 仅保留跨项目经验，daemon 记忆 API 收窄为仅管理「用户个性」和「全局记忆」（禁止通过 Web API 查看/修改 `workspace` 记忆）。
 - [x] `RunMemorySnapshot` 同步快照独立用户个性并在上下文中全量注入；同步清理 `GlobalDreamingService` 中的 `profileFacet`。
 - [x] 验证 migration 数据迁移兼容性、用户个性 CRUD、全局记忆与工作区记忆 API 边界隔离、快照注入、`pnpm typecheck` 与 `pnpm check`。
-- [ ] 用户人工代码阅读与校验（步骤 3）。
+- [x] 用户人工代码阅读与校验（步骤 3）。
 
 ### 步骤 4：全局跨项目记忆乐观锁增量合并与跨进程兜底
 
-- [ ] 改造 `GlobalDreamingService` 与 `global-dreaming-tools.ts`：读取阶段记录 `baseVersion`，准备提交前比较版本号；不一致时基于 `global_memory_versions` 计算精确结构化 diff（新增、修改、删除），切换工具视图至最新版本并支持覆盖/撤销已有草案，由全局 Agent 以**用户修改权威更高**原则执行增量合并后再走乐观锁提交（设有限合并轮次）。
-- [ ] 补齐 `publishGlobal` 向量写入（`memory_embeddings` 与 `memory_revision_embeddings`），并在主进程 `MemoryService` 写入事务内兜底跨进程 `UNIQUE` 冲突稳定映射为 `MEMORY_DUPLICATE`。
-- [ ] 验证后台整理期间用户新增/修改/删除全局记忆触发精确 diff 增量合并（用户为准、防复活、可撤销草案）、合并上限退回、跨进程重复写入兜底、`pnpm typecheck` 与 `pnpm check`。
+- [x] 改造 `GlobalDreamingService` 与 `global-dreaming-tools.ts`：读取阶段记录 `baseVersion`，准备提交前比较版本号；不一致时基于 `global_memory_versions` 计算精确结构化 diff（新增、修改、删除），切换工具视图至最新版本并支持覆盖/撤销已有草案，由全局 Agent 以**用户修改权威更高**原则执行增量合并后再走乐观锁提交（设有限合并轮次）。
+- [x] 补齐 `publishGlobal` 向量写入（`memory_embeddings` 与 `memory_revision_embeddings`），并在主进程 `MemoryService` 写入事务内兜底跨进程 `UNIQUE` 冲突稳定映射为 `MEMORY_DUPLICATE`。
+- [x] 验证后台整理期间用户新增/修改/删除全局记忆触发精确 diff 增量合并（用户为准、防复活、可撤销草案）、合并上限退回、跨进程重复写入兜底、`pnpm typecheck` 与 `pnpm check`。
 - [ ] 用户人工代码阅读与校验（步骤 4）。
 
 ### 步骤 5：Web 设置页双分类改造与反向冲突手动刷新

@@ -153,7 +153,12 @@ async function start(paths: {
   }
   const embedder = new LocalMemoryEmbedder(paths.globalRoot);
   const memories = new MemoryService(database.memories, embedder);
-  const globalService = new GlobalDreamingService(database.dreaming, database.sessions, providers);
+  const globalService = new GlobalDreamingService(
+    database.dreaming,
+    database.sessions,
+    providers,
+    embedder,
+  );
   const service = new DreamingService(
     paths.globalRoot,
     database.sessions,

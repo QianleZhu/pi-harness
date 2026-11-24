@@ -2,21 +2,27 @@ import { randomUUID } from "node:crypto";
 import { type ContextCompactedData, createAgent, projectContext } from "@pi-harness/agent-runtime";
 import {
   createGlobalDreamingTools,
+  diffGlobalMemories,
   GLOBAL_DREAMING_PROMPT,
   type GlobalDreamingCandidate,
   type GlobalDreamingMemoryChange,
+  type MemoryEmbedder,
+  type MemoryEmbedding,
 } from "@pi-harness/memory";
 import type { SessionRepository } from "../storage/database.js";
 import type { SqliteDreamingRepository } from "../storage/dreaming-repository.js";
 import type { ProviderService } from "./provider-service.js";
 
-// 串行整理跨工作区候选，提交前复查 user 记忆的发布版本。
+const MAX_GLOBAL_MERGE_ROUNDS = 3;
+
+// 串行整理跨工作区候选，提交前比较全局版本；若期间用户修改则计算精确 Diff 执行增量合并。
 export class GlobalDreamingService {
   private readonly queue: { workspaceId: string; candidate: GlobalDreamingCandidate }[] = [];
   public constructor(
     private readonly dreaming: SqliteDreamingRepository,
     private readonly sessions: SessionRepository,
     private readonly providers: ProviderService,
+    private readonly embedder?: MemoryEmbedder,
   ) {}
 
   // 工作区发布成功后，将候选放入 Worker 内存队列。
@@ -29,7 +35,7 @@ export class GlobalDreamingService {
     return this.queue.length > 0;
   }
 
-  // 本批无有效变更时只完成候选，不生成全局版本。
+  // 本批无有效变更时只完成候选，不生成全局版本；期间用户修改全局记忆时与最新快照增量合并。
   public async consolidate(input: {
     providerId: string;
     modelId: string;
@@ -43,7 +49,8 @@ export class GlobalDreamingService {
           throw new Error("Global candidate source not found");
       }
     }
-    const current = this.dreaming.getGlobalVersion();
+    let base = this.dreaming.getGlobalVersion();
+    let currentMemories = base.memories;
     const resolved = await this.providers.resolveRunModel(input.providerId, input.modelId);
     const signal = AbortSignal.any([input.signal, AbortSignal.timeout(600_000)]);
     signal.throwIfAborted();
@@ -57,7 +64,7 @@ export class GlobalDreamingService {
       streamFn: resolved.streamFn,
       systemPrompt: GLOBAL_DREAMING_PROMPT,
       tools: createGlobalDreamingTools({
-        memories: current.memories,
+        getMemories: () => currentMemories,
         candidates: batch.map((item) => item.candidate),
         changes,
         signal,
@@ -92,7 +99,7 @@ export class GlobalDreamingService {
     try {
       await agent.prompt(
         JSON.stringify({
-          memoryCount: current.memories.length,
+          memoryCount: base.memories.length,
           candidates: batch.map(({ candidate }) => ({
             content: candidate.content,
             applicability: candidate.applicability,
@@ -101,19 +108,97 @@ export class GlobalDreamingService {
         }),
       );
       signal.throwIfAborted();
+      const firstLast = agent.state.messages.at(-1);
+      if (firstLast?.role !== "assistant" || firstLast.stopReason !== "stop")
+        throw new Error("Global Dreaming failed");
+
+      for (let mergeRound = 0; mergeRound <= MAX_GLOBAL_MERGE_ROUNDS; mergeRound += 1) {
+        const latest = this.dreaming.getGlobalVersion();
+        if (latest.version === base.version) {
+          if (!changes.length) return;
+          await this.prepareEmbeddings(changes, signal);
+          signal.throwIfAborted();
+          if (
+            this.dreaming.publishGlobal({
+              expectedVersion: base.version,
+              changes,
+              now: Date.now(),
+            })
+          ) {
+            return;
+          }
+        }
+
+        // 版本在整理或提交前被用户修改；达到合并轮次上限时放回队列稍后处理。
+        if (mergeRound >= MAX_GLOBAL_MERGE_ROUNDS) {
+          this.queue.unshift(...batch);
+          return;
+        }
+
+        const newest = this.dreaming.getGlobalVersion();
+        const diff = diffGlobalMemories(base.memories, newest.memories);
+        const updatedIds = new Set(diff.updated.map((item) => item.id));
+        const deletedIds = new Set(diff.deleted.map((item) => item.id));
+        currentMemories = newest.memories;
+        base = newest;
+
+        await agent.prompt(
+          JSON.stringify({
+            versionChanged: true,
+            latestVersion: newest.version,
+            userChanges: diff,
+            currentDrafts: changes.map((change) => ({
+              memoryId: change.memoryId,
+              expectedRevision: change.expectedRevision,
+              content: change.content,
+              applicability: change.applicability,
+              evidenceStatus: change.evidenceStatus,
+              conflict: deletedIds.has(change.memoryId)
+                ? "user_deleted"
+                : updatedIds.has(change.memoryId)
+                  ? "user_updated"
+                  : null,
+            })),
+            message:
+              "User modified global memories while you were consolidating. Perform an incremental merge against the latest version. User edits are authoritative: resolve any conflict in favor of the user, drop or revise conflicting/duplicate drafts with drop_global_draft or draft_global_memory, and do not resurrect deleted memories.",
+          }),
+        );
+        signal.throwIfAborted();
+        const afterMerge = agent.state.messages.at(-1);
+        if (afterMerge?.role !== "assistant" || afterMerge.stopReason !== "stop")
+          throw new Error("Global Dreaming merge failed");
+      }
     } finally {
       signal.removeEventListener("abort", abort);
     }
-    const last = agent.state.messages.at(-1);
-    if (last?.role !== "assistant" || last.stopReason !== "stop")
-      throw new Error("Global Dreaming failed");
-    if (
-      !this.dreaming.publishGlobal({
-        expectedVersion: current.version,
-        changes,
-        now: Date.now(),
-      })
-    )
-      this.queue.unshift(...batch);
+  }
+
+  // 提交前提前计算归一化向量；本地模型不可用时退化为关键词召回。
+  private async prepareEmbeddings(
+    changes: readonly GlobalDreamingMemoryChange[],
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (!this.embedder) return;
+    for (const change of changes) {
+      change.embedding = await this.tryEmbed(change.content.trim().replaceAll(/\s+/g, " "), signal);
+    }
+  }
+
+  private async tryEmbed(content: string, signal: AbortSignal): Promise<MemoryEmbedding | null> {
+    if (!this.embedder) return null;
+    try {
+      const [vector] = await this.embedder.embed("document", [content], signal);
+      if (!vector?.length || vector.some((value) => !Number.isFinite(value))) return null;
+      const magnitude = Math.hypot(...vector);
+      if (!magnitude) return null;
+      return {
+        modelId: this.embedder.modelId,
+        dimensions: vector.length,
+        values: vector.map((value) => value / magnitude),
+      };
+    } catch (error: unknown) {
+      if (signal.aborted) throw error;
+      return null;
+    }
   }
 }

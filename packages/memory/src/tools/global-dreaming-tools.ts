@@ -24,11 +24,15 @@ const InspectSchema = Type.Object({
   query: Type.Optional(Type.String({ maxLength: 500 })),
   offset: Type.Optional(Type.Integer({ minimum: 0 })),
 });
+const ListDraftsSchema = Type.Object({});
+const DropDraftSchema = Type.Object({
+  memoryId: Type.String({ minLength: 1, maxLength: 128 }),
+});
 const MAX_GLOBAL_TOOL_CALLS = 120;
 
-// 限制全局 Agent 只能引用本批候选和固定版本中的记忆。
+// 限制全局 Agent 只能引用本批候选和当前生效快照中的记忆；支持增量合并轮次更新或撤销草案。
 export function createGlobalDreamingTools(options: {
-  memories: readonly MemoryRecord[];
+  getMemories: () => readonly MemoryRecord[];
   candidates: readonly GlobalDreamingCandidate[];
   changes: GlobalDreamingMemoryChange[];
   readRevision: (memoryId: string, revision: number) => MemoryRevision | null;
@@ -37,6 +41,13 @@ export function createGlobalDreamingTools(options: {
   onLimit: () => void;
 }): readonly AgentTool[] {
   let calls = 0;
+  const count = () => {
+    options.signal.throwIfAborted();
+    if (++calls > MAX_GLOBAL_TOOL_CALLS) {
+      options.onLimit();
+      throw new Error("Global Dreaming tool limit exceeded");
+    }
+  };
   return [
     {
       name: "inspect_global_memories",
@@ -46,17 +57,13 @@ export function createGlobalDreamingTools(options: {
       executionMode: "sequential",
       parameters: InspectSchema,
       async execute(_id, value) {
-        options.signal.throwIfAborted();
-        if (++calls > MAX_GLOBAL_TOOL_CALLS) {
-          options.onLimit();
-          throw new Error("Global Dreaming tool limit exceeded");
-        }
+        count();
         if (!Value.Check(InspectSchema, value)) throw new Error("Invalid global memory query");
         const args = value as Static<typeof InspectSchema>;
         const query = args.query?.trim().toLocaleLowerCase() ?? "";
-        const matches = options.memories.filter((memory) =>
-          memory.content.toLocaleLowerCase().includes(query),
-        );
+        const matches = options
+          .getMemories()
+          .filter((memory) => memory.content.toLocaleLowerCase().includes(query));
         const offset = args.offset ?? 0;
         const result = {
           total: matches.length,
@@ -73,42 +80,95 @@ export function createGlobalDreamingTools(options: {
       },
     },
     {
+      name: "list_global_drafts",
+      label: "List global drafts",
+      description: "List all currently drafted global memory changes in this consolidation batch.",
+      executionMode: "sequential",
+      parameters: ListDraftsSchema,
+      async execute(_id, value) {
+        count();
+        if (!Value.Check(ListDraftsSchema, value)) throw new Error("Invalid draft list query");
+        const result = options.changes.map((change) => ({
+          memoryId: change.memoryId,
+          expectedRevision: change.expectedRevision,
+          content: change.content,
+          applicability: change.applicability,
+          evidenceStatus: change.evidenceStatus,
+        }));
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(result) }],
+          details: result,
+        };
+      },
+    },
+    {
       name: "draft_global_memory",
       label: "Draft global memory",
       description:
-        "Create or update a cross-project global memory, citing candidate indexes. Do not store personal user profile items here.",
+        "Create, update, or replace a draft for a cross-project global memory, citing candidate indexes. Do not store personal user profile items here.",
       executionMode: "sequential",
       parameters: DraftSchema,
       async execute(_id, value) {
-        options.signal.throwIfAborted();
-        if (++calls > MAX_GLOBAL_TOOL_CALLS) {
-          options.onLimit();
-          throw new Error("Global Dreaming tool limit exceeded");
-        }
+        count();
         if (!Value.Check(DraftSchema, value)) throw new Error("Invalid global memory draft");
         const args = value as Static<typeof DraftSchema>;
-        const memory =
+        const currentMemories = options.getMemories();
+        const existingMemory =
           args.memoryId === null
             ? null
-            : options.memories.find((item) => item.id === args.memoryId);
-        if (args.memoryId !== null && !memory) throw new Error("Global memory not found");
-        const memoryId = memory?.id ?? randomUUID();
-        if (options.changes.some((change) => change.memoryId === memoryId))
-          throw new Error("Memory already drafted");
+            : (currentMemories.find((item) => item.id === args.memoryId) ?? null);
+        const existingDraftIndex =
+          args.memoryId === null
+            ? -1
+            : options.changes.findIndex((change) => change.memoryId === args.memoryId);
+        if (args.memoryId !== null && !existingMemory && existingDraftIndex < 0) {
+          throw new Error("Global memory not found");
+        }
+        const memoryId = existingMemory?.id ?? args.memoryId ?? randomUUID();
         const sources = args.candidateIndexes.flatMap((index) => {
           const candidate = options.candidates[index];
           if (!candidate) throw new Error("Global candidate not found");
           return candidate.sources;
         });
-        options.changes.push({
+        const nextChange: GlobalDreamingMemoryChange = {
           memoryId,
-          expectedRevision: memory?.revision ?? null,
+          expectedRevision: existingMemory?.revision ?? null,
           content: args.content,
           applicability: args.applicability,
           evidenceStatus: args.evidenceStatus,
           sources,
-        });
-        const result = { memoryId };
+        };
+        if (existingDraftIndex >= 0) {
+          options.changes[existingDraftIndex] = nextChange;
+        } else {
+          options.changes.push(nextChange);
+        }
+        const result = {
+          memoryId,
+          expectedRevision: nextChange.expectedRevision,
+          replaced: existingDraftIndex >= 0,
+        };
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(result) }],
+          details: result,
+        };
+      },
+    },
+    {
+      name: "drop_global_draft",
+      label: "Drop global draft",
+      description:
+        "Withdraw a previously drafted global memory change (for example when superseded by a concurrent user edit or deletion).",
+      executionMode: "sequential",
+      parameters: DropDraftSchema,
+      async execute(_id, value) {
+        count();
+        if (!Value.Check(DropDraftSchema, value)) throw new Error("Invalid drop draft input");
+        const args = value as Static<typeof DropDraftSchema>;
+        const index = options.changes.findIndex((change) => change.memoryId === args.memoryId);
+        if (index < 0) throw new Error("Global draft not found");
+        options.changes.splice(index, 1);
+        const result = { dropped: true, memoryId: args.memoryId };
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result) }],
           details: result,

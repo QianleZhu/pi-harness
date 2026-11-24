@@ -48,15 +48,70 @@ export async function cleanupDreamingDirectories(
   }
 }
 
-// 读取当前发布的 Wiki，整理时在内存中维护完整草案。
+// 读取当前发布的 Wiki，整理时在内存中维护完整草案；注入上下文已独立存储。
 export async function readWiki(directory: string | null): Promise<Map<string, string>> {
   const files = new Map<string, string>();
   if (!directory) return files;
   for (const name of await readdir(directory)) {
-    if (!DREAMING_WIKI_NAME_PATTERN.test(name)) throw new Error("Invalid Wiki filename");
+    if (!DREAMING_WIKI_NAME_PATTERN.test(name) || name === "context.md") continue;
     files.set(name, await readFile(join(directory, name), "utf8"));
   }
   return files;
+}
+
+// 注入上下文与 Wiki 分开存储，每个版本使用独立目录保存 context.md。
+export function contextDirectory(root: string, workspaceId: string, directoryId: string): string {
+  if (!ID_PATTERN.test(workspaceId) || !ID_PATTERN.test(directoryId))
+    throw new Error("Invalid Dreaming context directory");
+  return join(root, "dreaming", workspaceId, "contexts", directoryId);
+}
+
+// 读取上下文版本；目录缺失时返回 null。
+export async function readContextFile(directory: string): Promise<string | null> {
+  try {
+    return await readFile(join(directory, "context.md"), "utf8");
+  } catch (error: unknown) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+// 清理数据库没有引用的上下文目录，已发布版本保持可读。
+export async function cleanupDreamingContextDirectories(
+  root: string,
+  dreaming: SqliteDreamingRepository,
+): Promise<void> {
+  const base = resolve(root, "dreaming");
+  let workspaces: Dirent[];
+  try {
+    workspaces = await readdir(base, { withFileTypes: true });
+  } catch (error: unknown) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+    throw error;
+  }
+  for (const workspace of workspaces) {
+    if (!workspace.isDirectory() || !ID_PATTERN.test(workspace.name)) continue;
+    const contextsPath = join(base, workspace.name, "contexts");
+    let contexts: Dirent[];
+    try {
+      contexts = await readdir(contextsPath, { withFileTypes: true });
+    } catch (error: unknown) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") continue;
+      throw error;
+    }
+    for (const context of contexts) {
+      if (
+        !context.isDirectory() ||
+        !ID_PATTERN.test(context.name) ||
+        dreaming.hasContextVersion(workspace.name, context.name)
+      )
+        continue;
+      const target = resolve(contextsPath, context.name);
+      if (target !== join(contextsPath, context.name))
+        throw new Error("Invalid Dreaming context directory");
+      await rm(target, { recursive: true, force: true });
+    }
+  }
 }
 
 // 移除第一层临时区块，保留其前后的正式上下文。
@@ -80,7 +135,19 @@ export function stripRecordedMemorySection(context: string): string {
   return `${collapsed.trimEnd()}${newline}`;
 }
 
-// 校验完整 Wiki 的预算和摘要引用。
+// 校验独立的注入上下文预算、导航和临时区块。
+export function validateContext(
+  context: string,
+  files: Map<string, string>,
+): void {
+  if (context.length > 2000) throw new Error("Dreaming context exceeds budget");
+  if (context.includes(RECORDED_MEMORY_CONTEXT_HEADING))
+    throw new Error("Dreaming context must not include provisional recorded memories");
+  if (!context.includes("index.md") || !files.has("index.md"))
+    throw new Error("Dreaming context must point to navigation");
+}
+
+// 校验完整 Wiki 的预算和摘要引用；注入上下文由 validateContext 单独校验。
 export function validateWiki(
   files: Map<string, string>,
   changes: DreamingMemoryChange[],
@@ -88,17 +155,14 @@ export function validateWiki(
   dreaming: SqliteDreamingRepository,
   workspaceId: string,
 ) {
-  const context = files.get("context.md");
   const index = files.get("index.md");
-  if (context === undefined || index === undefined || context.length > 2000 || index.length > 4000)
-    throw new Error("Invalid Wiki navigation or context");
-  if (context.includes(RECORDED_MEMORY_CONTEXT_HEADING))
-    throw new Error("Wiki context must not include provisional recorded memories");
-  if (!context.includes("index.md")) throw new Error("Wiki context must point to navigation");
+  if (index === undefined || index.length > 4000)
+    throw new Error("Invalid Wiki navigation");
   let topicsLength = 0;
   const refs = new Map<string, { memoryId: string; revision: number; isCurrent: boolean }>();
   for (const [name, text] of files) {
-    if (!DREAMING_WIKI_NAME_PATTERN.test(name)) throw new Error("Invalid Wiki filename");
+    if (!DREAMING_WIKI_NAME_PATTERN.test(name) || name === "context.md")
+      throw new Error("Invalid Wiki filename");
     // 仅校验正文链接；代码示例中的链接文本不代表 Wiki 导航。
     const prose = text
       .replaceAll(/^[ \t]{0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^[ \t]{0,3}\1[ \t]*$/gm, "")

@@ -30,6 +30,7 @@ export const ToolPermission = {
 interface ToolApprovalGrant {
   allowSimilar?: boolean;
   allowSession?: boolean;
+  denyReason?: string;
   fingerprint: string;
   isGranted?: boolean;
   risk: string;
@@ -169,6 +170,9 @@ export async function evaluateToolCall(input: EvaluateToolCallInput): Promise<To
   switch (input.policy.permission) {
     case ToolPermission.USER_APPROVAL: {
       const grant = await input.policy.resolveGrant(input.arguments, input.signal);
+      if (grant.denyReason !== undefined) {
+        return { decision: ToolPolicyDecision.DENY, reason: grant.denyReason };
+      }
       if (grant.isGranted === true) {
         return { decision: ToolPolicyDecision.ALLOW, fingerprint: grant.fingerprint };
       }

@@ -51,6 +51,10 @@ const ReadRunSchema = Type.Object({
 });
 const ListRunsSchema = Type.Object({});
 const ReadWikiSchema = Type.Object({ name: Type.Optional(Type.String()) });
+const ReadContextSchema = Type.Object({});
+const WriteContextSchema = Type.Object({
+  content: Type.String({ maxLength: 2000 }),
+});
 const DraftSchema = Type.Object({
   memoryId: Type.Union([Type.String(), Type.Null()]),
   content: Type.String({ minLength: 1, maxLength: 500 }),
@@ -112,6 +116,7 @@ export function createDreamingTools(options: {
   runs: ReadonlyMap<string, readonly DreamingEvent[]>;
   readRuns: Set<string>;
   files: Map<string, string>;
+  context: { content: string };
   changes: DreamingMemoryChange[];
   globalCandidates: GlobalDreamingCandidate[];
   sessions: { find(sessionId: string): { workspaceId: string } | null };
@@ -133,6 +138,7 @@ export function createDreamingTools(options: {
     runs,
     readRuns,
     files,
+    context,
     changes,
     globalCandidates,
     sessions,
@@ -318,13 +324,40 @@ export function createDreamingTools(options: {
     {
       name: "read_wiki",
       label: "Read Wiki",
-      description: "Read a Wiki file, or list files if name is omitted.",
+      description: "Read a Wiki file (index or topic), or list files if name is omitted.",
       executionMode: "sequential",
       parameters: ReadWikiSchema,
       execute: async (_id, value) => {
         count();
         const args = validateToolInput(ReadWikiSchema, value);
+        if (args.name === "context.md") throw new Error("Context is not part of the Wiki");
         return result(args.name === undefined ? [...files.keys()] : (files.get(args.name) ?? null));
+      },
+    },
+    {
+      name: "read_context",
+      label: "Read context",
+      description: "Read the current injected context draft.",
+      executionMode: "sequential",
+      parameters: ReadContextSchema,
+      execute: async (_id, value) => {
+        count();
+        validateToolInput(ReadContextSchema, value);
+        return result({ content: context.content });
+      },
+    },
+    {
+      name: "write_context",
+      label: "Write context draft",
+      description:
+        "Replace the injected context draft. Keep a navigation link to index.md and remove processed provisional entries.",
+      executionMode: "sequential",
+      parameters: WriteContextSchema,
+      execute: async (_id, value) => {
+        count();
+        const args = validateToolInput(WriteContextSchema, value);
+        context.content = args.content;
+        return result({ characters: args.content.length });
       },
     },
     {
@@ -383,13 +416,14 @@ export function createDreamingTools(options: {
     {
       name: "write_wiki",
       label: "Write Wiki draft",
-      description: "Write one Markdown file: context.md, index.md or a topic filename.",
+      description: "Write one Wiki Markdown file: index.md or a topic filename.",
       executionMode: "sequential",
       parameters: WriteWikiSchema,
       execute: async (_id, value) => {
         count();
         const args = validateToolInput(WriteWikiSchema, value);
-        if (!DREAMING_WIKI_NAME_PATTERN.test(args.name)) throw new Error("Invalid Wiki filename");
+        if (!DREAMING_WIKI_NAME_PATTERN.test(args.name) || args.name === "context.md")
+          throw new Error("Invalid Wiki filename");
         files.set(args.name, args.content);
         return result({ name: args.name });
       },

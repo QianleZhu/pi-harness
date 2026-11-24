@@ -541,24 +541,10 @@ export class SqliteMemoryRepository implements MemoryRepository {
     }
   }
 
-  // 同时保存记忆开关和 Dreaming 开启代次。
+  // 保存两个独立的记忆开关，只影响下一次启动的记忆工作。
   public updateSettings(settings: MemorySettings, updatedAt: number): void {
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      // 仅在两个开关从不可用变为同时开启时进入新代次。
-      const previous = this.getSettings();
-      if (
-        !(previous.useMemories && previous.generateMemories) &&
-        settings.useMemories &&
-        settings.generateMemories
-      ) {
-        this.database
-          .prepare(
-            `UPDATE app_settings SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT), updated_at = ?
-           WHERE key = 'dreaming_generation'`,
-          )
-          .run(updatedAt);
-      }
       this.upsertSettings(settings, updatedAt);
       this.database.exec("COMMIT");
     } catch (error: unknown) {

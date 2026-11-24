@@ -1,8 +1,15 @@
+import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
 export type DatabaseMigration =
   | { sql: string; version: string }
   | { migrate: (database: DatabaseSync) => void; version: string };
+
+// 迁移时使用的旧版注入上下文默认值；已执行的 migration 不随后续常量调整。
+const LEGACY_MEMORY_CONTEXT = "# 注入上下文\n\n导航：[索引](index.md)\n";
+const ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * migration 按顺序保存，使数据库结构变更明确，并能随 TypeScript 构建产物一起发布。
@@ -657,5 +664,66 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
   {
     version: "030-global-candidates-in-memory.sql",
     sql: `DROP TABLE global_dreaming_candidates;`,
+  },
+  {
+    version: "031-split-dreaming-context.sql",
+    migrate: (database) => {
+      database.exec(`
+        CREATE TABLE dreaming_context (
+          workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+          directory_id TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        ) STRICT;
+
+        CREATE TABLE dreaming_context_versions (
+          workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+          version INTEGER NOT NULL CHECK (version > 0),
+          directory_id TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          PRIMARY KEY (workspace_id, version),
+          UNIQUE (workspace_id, directory_id)
+        ) STRICT;
+      `);
+
+      // 把已发布 Wiki 目录中的 context.md 复制为独立上下文版本，保持注入内容连续。
+      const rows = database
+        .prepare("SELECT workspace_id, directory_id, updated_at FROM dreaming_wiki")
+        .all();
+      if (!rows.length) return;
+      const fileRow = database
+        .prepare("SELECT file FROM pragma_database_list WHERE name = 'main'")
+        .get();
+      if (!fileRow || typeof fileRow.file !== "string" || !fileRow.file) return;
+      const dataRoot = dirname(fileRow.file);
+      const insertVersion = database.prepare(
+        "INSERT INTO dreaming_context_versions (workspace_id, version, directory_id, created_at) VALUES (?, 1, ?, ?)",
+      );
+      const insertPointer = database.prepare(
+        "INSERT INTO dreaming_context (workspace_id, directory_id, updated_at) VALUES (?, ?, ?)",
+      );
+      for (const row of rows) {
+        const workspaceId = String(row.workspace_id);
+        const wikiDirectoryId = String(row.directory_id);
+        const updatedAt = Number(row.updated_at);
+        let content = LEGACY_MEMORY_CONTEXT;
+        if (ID_PATTERN.test(workspaceId) && ID_PATTERN.test(wikiDirectoryId)) {
+          try {
+            const existing = readFileSync(
+              join(dataRoot, "dreaming", workspaceId, wikiDirectoryId, "context.md"),
+              "utf8",
+            );
+            if (existing.trim()) content = existing;
+          } catch {
+            content = LEGACY_MEMORY_CONTEXT;
+          }
+        }
+        const contextDirectoryId = randomUUID();
+        const directory = join(dataRoot, "dreaming", workspaceId, "contexts", contextDirectoryId);
+        mkdirSync(directory, { mode: 0o700, recursive: true });
+        writeFileSync(join(directory, "context.md"), content, { encoding: "utf8", mode: 0o600 });
+        insertVersion.run(workspaceId, contextDirectoryId, updatedAt);
+        insertPointer.run(workspaceId, contextDirectoryId, updatedAt);
+      }
+    },
   },
 ];

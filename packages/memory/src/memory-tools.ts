@@ -104,8 +104,11 @@ function learningPolicy(
       return {
         allowSession: false,
         allowSimilar: false,
+        ...(settings.generateMemories
+          ? {}
+          : { denyReason: "MEMORY_LEARNING_DISABLED: 已关闭生成记忆" }),
         fingerprint: JSON.stringify(args),
-        isGranted: settings.useMemories && settings.generateMemories,
+        isGranted: settings.generateMemories,
         risk,
         summary,
         target: target(args),

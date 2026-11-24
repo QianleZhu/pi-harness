@@ -1,10 +1,53 @@
 # Dreaming 实施待办清单
 
-> 2026-11-22 更新：分析与整理已合并为一个带工具的 Dreaming Agent；下方历史阶段保留记录，当前实现以“统一整理 Agent”章节为准。
+> 2026-11-24 更新：敲定记忆并发、用户个性独立表、在线暂存表与双开关解耦方案；下方“记忆并发、用户个性与开关重构”按分步可测原则依次推进，每完成一步即测试并停下供人工代码阅读。
+> 2026-11-22 更新：分析与整理已合并为一个带工具的 Dreaming Agent；下方历史阶段保留记录。
 
 每个阶段先讨论技术实现，再进行编码；完成后由用户校验，通过后进入下一阶段。实施或验证完成一项后及时勾选，用户校验项在用户确认后勾选。
 
-## 统一整理 Agent（当前实现）
+## 记忆并发、用户个性与开关重构（2026-11-24）
+
+### 步骤 1：双开关解耦与「启动固定、下一次生效」语义
+
+- [x] 彻底解耦 `useMemories` 与 `generateMemories`：支持 2×2 全部组合（仅用、仅生成、全开、全关）；`record_memory` 与 Dreaming 调度仅检查 `generateMemories`，不再绑定 `useMemories`。
+- [x] `RunMemorySnapshot` 固定本次 Run 的 `useMemories`，移除 `buildContext` / `readWiki` / `readRevision` / `readSource` / `search` 在 Run 中途因关闭开关导致的拦截。
+- [x] 简化 `dreaming_runs` 登记与结束逻辑：`generateMemories = true` 时发起的 Run 结束一律正常转 `pending`（取消跨开关 `dreaming_generation` 跳过逻辑）；关闭开关后不中止已启动的写入工具与 Dreaming 批次，只阻止启动下一次，重新开启后一并整理残留 `pending` Run。
+- [x] 验证 2×2 开关组合、Run 中途关开关不中断、关闭暂停与重开恢复、`pnpm typecheck` 与 `pnpm check`。
+- [ ] 用户人工代码阅读与校验（步骤 1）。
+
+### 步骤 2：工作区在线暂存表 `provisional_memories`、内存拼装注入与 Workspace 级空闲 Dreaming
+
+- [ ] 新增显式 SQLite migration 建立 `provisional_memories`（Append-Only，含 `workspace_id`、`session_id`、`run_id`、`content`、`applicability`、`evidence_status`、`status`、`created_at`、`resolved_at`）。
+- [ ] 改造 `MemoryRecorderService`：只向 `provisional_memories` 插入 `pending` 记录，不再写入正式 `memories` 表、不再改写磁盘 `context.md` 或 CAS 更新 `dreaming_context`。
+- [ ] 改造 `RunMemorySnapshot`、`DreamingReaderService` 与 `MemoryService`：按 `(workspaceId, sessionId)` 读取同 Session 已落表的 `pending` 暂存记录，在 `buildContext()` 内存中拼装独立区块（独立预算，超出按方案 A 降级关键词检索，不建向量索引），跨 Session 互相隔离。
+- [ ] 改造 `DreamingScheduler`：改为**整个 Workspace 无活动 Session 且所有 Session 空闲 30 分钟**才启动工作区 Dreaming。
+- [ ] 改造 `DreamingService`、`SqliteDreamingRepository` 与 `dreaming-tools.ts`：启动时在 `claimPendingRuns` 同事务原子认领该 Workspace 当前全部 `pending` 暂存条目（含此前失败批次遗留条目）；发布时仅更新本批认领记录状态，移除 `context.md` 3 轮冲突比对与临时区剥离逻辑。
+- [ ] 验证多 Session 并发写入、同 Session 落表立即可见与跨 Session 隔离、内存拼装不改 `context.md`、超预算降级检索、Workspace 级空闲调度、Dreaming 期间新写入隔离与遗留条目顺带审核、`pnpm typecheck` 与 `pnpm check`。
+- [ ] 用户人工代码阅读与校验（步骤 2）。
+
+### 步骤 3：用户个性独立表拆分与 API 边界收窄
+
+- [ ] 新增显式 SQLite migration 建立独立 `user_profiles` 表，迁移原 `memories` 中 `scope = 'user' AND profile_facet IS NOT NULL` 的记录，并重建仅含跨项目全局记忆的 `global_memory_versions`。
+- [ ] 更新 `packages/memory` 契约与服务：拆分独立的用户个性读写契约（仅用户手动维护），全局记忆去掉 `profileFacet` 仅保留跨项目经验，daemon 记忆 API 收窄为仅管理「用户个性」和「全局记忆」（禁止通过 Web API 查看/修改 `workspace` 记忆）。
+- [ ] `RunMemorySnapshot` 同步快照独立用户个性并在上下文中全量注入；同步清理 `GlobalDreamingService` 中的 `profileFacet`。
+- [ ] 验证 migration 数据迁移兼容性、用户个性 CRUD、全局记忆与工作区记忆 API 边界隔离、快照注入、`pnpm typecheck` 与 `pnpm check`。
+- [ ] 用户人工代码阅读与校验（步骤 3）。
+
+### 步骤 4：全局跨项目记忆乐观锁增量合并与跨进程兜底
+
+- [ ] 改造 `GlobalDreamingService` 与 `global-dreaming-tools.ts`：读取阶段记录 `baseVersion`，准备提交前比较版本号；不一致时基于 `global_memory_versions` 计算精确结构化 diff（新增、修改、删除），切换工具视图至最新版本并支持覆盖/撤销已有草案，由全局 Agent 以**用户修改权威更高**原则执行增量合并后再走乐观锁提交（设有限合并轮次）。
+- [ ] 补齐 `publishGlobal` 向量写入（`memory_embeddings` 与 `memory_revision_embeddings`），并在主进程 `MemoryService` 写入事务内兜底跨进程 `UNIQUE` 冲突稳定映射为 `MEMORY_DUPLICATE`。
+- [ ] 验证后台整理期间用户新增/修改/删除全局记忆触发精确 diff 增量合并（用户为准、防复活、可撤销草案）、合并上限退回、跨进程重复写入兜底、`pnpm typecheck` 与 `pnpm check`。
+- [ ] 用户人工代码阅读与校验（步骤 4）。
+
+### 步骤 5：Web 设置页双分类改造与反向冲突手动刷新
+
+- [ ] 改造 Web 记忆设置页：明确拆分为「用户个性」（手动 CRUD）与「全局记忆」（跨项目经验查看与 CRUD）两类，移除工作区记忆展示与编辑入口。
+- [ ] 实现反向并发冲突交互：编辑或删除全局记忆撞上 `MEMORY_CONFLICT` 时，保留用户当前表单输入不自动覆盖，展示清晰冲突提示并提供手动「刷新」按钮供用户自行拉取最新内容。
+- [ ] 验证 Web 构建、类型检查、Biome 检查与冲突交互逻辑。
+- [ ] 用户人工代码阅读与校验（步骤 5）。
+
+## 统一整理 Agent（历史实现）
 
 - [x] 移除独立分析模型调用和候选解析；分析、整理由同一个 Dreaming Agent 完成。
 - [x] 一个 workspace 只运行一个 Dreaming Agent，收集全部符合条件的 Run，按 Session 和启动时间依次读取。
@@ -15,6 +58,7 @@
 - [x] 支持确认、修正、冲突、过时和临时记忆处理；没有变更理由时允许不更新。
 - [x] 全局记忆由单一全局 Agent 串行处理；没有值得复用的经验时允许不提交。
 - [x] 记忆结构尚未建立时，Dreaming 以默认脚手架启动，并根据本批原始日志搭建初始 Wiki 与记忆。
+- [x] 注入上下文从 Wiki 中拆出，使用独立的上下文版本、不可变副本和发布指针；`record_memory` 只发布新上下文副本并递增版本，Dreaming 发布前重新比较版本并让 Agent 对比最新内容。
 - [x] 移除 `save_memory`、`update_memory`、`delete_memory` Agent 工具，只保留 `search_memories` 与主动学习的 `record_memory`；手动记忆管理继续通过 daemon API 完成。
 - [x] 验证多 Run 多 Session 单 Agent、工具分页、上下文压缩和全局记忆发布。
 

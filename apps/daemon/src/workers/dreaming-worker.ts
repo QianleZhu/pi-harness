@@ -14,7 +14,7 @@ import { LocalMemoryEmbedder } from "../services/local-memory-embedder.js";
 import { ProviderService } from "../services/provider-service.js";
 import { type HarnessDatabase, openHarnessDatabase } from "../storage/database.js";
 import { SessionEventStore } from "../storage/session-event-store.js";
-import { cleanupDreamingDirectories } from "../utils/dreaming-wiki.js";
+import { cleanupDreamingContextDirectories, cleanupDreamingDirectories } from "../utils/dreaming-wiki.js";
 
 type Pending = {
   resolve: (value: unknown) => void;
@@ -142,6 +142,7 @@ async function start(paths: {
   }
   database.dreaming.failInterrupted(Date.now());
   await cleanupDreamingDirectories(paths.globalRoot, database.dreaming);
+  await cleanupDreamingContextDirectories(paths.globalRoot, database.dreaming);
   providers = await ProviderService.create(database.providerSettings, credentials);
   if (shouldRefreshProviders) {
     providers.refreshCustomProviders();

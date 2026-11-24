@@ -57,7 +57,7 @@ function mapRevision(row: Record<string, unknown>): MemoryRevision {
 export class SqliteDreamingRepository {
   public constructor(private readonly database: DatabaseSync) {}
 
-  // 在同一读取事务中固定 Wiki 指针和所有可见记忆的版本。
+  // 在同一读取事务中固定 Wiki、上下文指针和所有可见记忆的版本。
   public captureSnapshot(workspaceId: string): RunMemorySnapshot {
     this.database.exec("BEGIN");
     try {
@@ -70,6 +70,11 @@ export class SqliteDreamingRepository {
             .get(workspaceId, wikiDirectoryId)
         : undefined;
       if (wikiDirectoryId && !wikiVersionRow) throw new Error("Dreaming Wiki version not found");
+      const context = this.findContext(workspaceId);
+      const contextVersion = context
+        ? this.findContextVersion(workspaceId, context.directoryId)
+        : null;
+      if (context && contextVersion === null) throw new Error("Dreaming context version not found");
       const rows = this.database
         .prepare(`SELECT id, revision FROM memories
         WHERE status = 'saved' AND (scope = 'user' OR workspace_id = ?)`)
@@ -91,6 +96,8 @@ export class SqliteDreamingRepository {
       this.database.exec("COMMIT");
       return {
         workspaceId,
+        contextDirectoryId: context?.directoryId ?? null,
+        contextVersion,
         wikiDirectoryId,
         wikiVersion: wikiVersionRow ? Number(wikiVersionRow.version) : null,
         versions,
@@ -293,7 +300,7 @@ export class SqliteDreamingRepository {
       .run(JSON.stringify(model), updatedAt);
   }
 
-  // 在 Run 开始时记录启用代次，供结束时判断是否跨越开关边界。
+  // 在 Run 开始时仅检查生成记忆开关，关闭时新 Run 不进入待整理队列。
   public recordRunStart(input: {
     runId: string;
     workspaceId: string;
@@ -302,7 +309,7 @@ export class SqliteDreamingRepository {
   }): void {
     const settings = this.database.prepare("SELECT key, value FROM memory_settings").all();
     const enabled = (key: string) => settings.find((row) => row.key === key)?.value !== 0;
-    if (!enabled("use_memories") || !enabled("generate_memories")) return;
+    if (!enabled("generate_memories")) return;
     this.database
       .prepare(`INSERT OR IGNORE INTO dreaming_runs
       (run_id, workspace_id, session_id, start_generation, status, candidates_json, started_at, finished_at, updated_at)
@@ -318,27 +325,15 @@ export class SqliteDreamingRepository {
       );
   }
 
-  // Run 结束时只接收在同一开启代次内完成的工作。
+  // 已登记的 Run 结束时正常转为待整理；中途关闭开关不影响已开始的 Run，只阻止后续启动新的整理。
   public recordRunEnd(runId: string, timestamp: number): void {
     const run = this.findRun(runId);
     if (!run || run.status !== RunStatus.WAITING) return;
-    const settings = this.database.prepare("SELECT key, value FROM memory_settings").all();
-    const enabled = (key: string) => settings.find((row) => row.key === key)?.value !== 0;
-    const isEligible =
-      enabled("use_memories") &&
-      enabled("generate_memories") &&
-      run.startGeneration === this.getGeneration();
     this.database
       .prepare(
         "UPDATE dreaming_runs SET status = ?, finished_at = ?, updated_at = ? WHERE run_id = ? AND status = ?",
       )
-      .run(
-        isEligible ? RunStatus.PENDING : RunStatus.SKIPPED,
-        timestamp,
-        timestamp,
-        runId,
-        RunStatus.WAITING,
-      );
+      .run(RunStatus.PENDING, timestamp, timestamp, runId, RunStatus.WAITING);
   }
 
   // 按 Session 分组并按启动顺序读取待处理 Run，供单个工作区 Agent 依次处理。
@@ -502,6 +497,75 @@ export class SqliteDreamingRepository {
       }));
   }
 
+  // 获取工作区当前发布的上下文目录指针。
+  public findContext(workspaceId: string): { directoryId: string; updatedAt: number } | null {
+    const row = this.database
+      .prepare("SELECT directory_id, updated_at FROM dreaming_context WHERE workspace_id = ?")
+      .get(workspaceId);
+    return row === undefined
+      ? null
+      : { directoryId: String(row.directory_id), updatedAt: Number(row.updated_at) };
+  }
+
+  // 读取上下文目录对应的已发布版本号。
+  public findContextVersion(workspaceId: string, directoryId: string): number | null {
+    const row = this.database
+      .prepare(
+        `SELECT MAX(version) AS version FROM dreaming_context_versions
+        WHERE workspace_id = ? AND directory_id = ?`,
+      )
+      .get(workspaceId, directoryId);
+    return row?.version === null || row?.version === undefined ? null : Number(row.version);
+  }
+
+  // 查询未发布上下文目录，供恢复清理使用。
+  public hasContextVersion(workspaceId: string, directoryId: string): boolean {
+    return (
+      this.database
+        .prepare(
+          "SELECT 1 FROM dreaming_context_versions WHERE workspace_id = ? AND directory_id = ?",
+        )
+        .get(workspaceId, directoryId) !== undefined
+    );
+  }
+
+  // 在调用方事务内写入新的上下文版本并移动指针。
+  private saveContext(input: { workspaceId: string; directoryId: string; now: number }): void {
+    this.database
+      .prepare(`INSERT INTO dreaming_context_versions
+      (workspace_id, version, directory_id, created_at)
+      VALUES (?, (SELECT COALESCE(MAX(version), 0) + 1 FROM dreaming_context_versions WHERE workspace_id = ?), ?, ?)`)
+      .run(input.workspaceId, input.workspaceId, input.directoryId, input.now);
+    this.database
+      .prepare(`INSERT INTO dreaming_context (workspace_id, directory_id, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(workspace_id) DO UPDATE SET directory_id = excluded.directory_id, updated_at = excluded.updated_at`)
+      .run(input.workspaceId, input.directoryId, input.now);
+  }
+
+  // 主 Agent 记录新上下文版本；指针已变化时由调用方重试。
+  public publishContext(input: {
+    workspaceId: string;
+    directoryId: string;
+    expectedDirectoryId: string | null;
+    now: number;
+  }): boolean {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      if (
+        (this.findContext(input.workspaceId)?.directoryId ?? null) !== input.expectedDirectoryId
+      ) {
+        this.database.exec("ROLLBACK");
+        return false;
+      }
+      this.saveContext(input);
+      this.database.exec("COMMIT");
+      return true;
+    } catch (error: unknown) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   // 获取工作区当前发布的 Wiki 目录。
   public findWiki(workspaceId: string): DreamingWikiRecord | null {
     const row = this.database
@@ -590,6 +654,7 @@ export class SqliteDreamingRepository {
     const normalized = content.toLocaleLowerCase();
     const expectedRevision = change.expectedRevision;
     const created = expectedRevision === null;
+    let baseRevision: number | null = null;
     let revision = 1;
     if (created) {
       this.database
@@ -609,34 +674,28 @@ export class SqliteDreamingRepository {
       const current = this.database
         .prepare("SELECT * FROM memories WHERE id = ? AND workspace_id = ? AND scope = 'workspace'")
         .get(change.memoryId, workspaceId);
-      if (!current || current.revision !== expectedRevision)
-        throw new Error("Dreaming memory revision conflict");
-      // 若当前版本来自手动修改，先保留该版本，避免覆盖旧内容。
+      if (!current) throw new Error("Dreaming memory not found");
+      // 主 Agent 可能在整理期间写入新版本；以最新版本为基准重新判断是否需要更新。
+      baseRevision = Number(current.revision);
       this.database
         .prepare(`INSERT OR IGNORE INTO memory_revisions
         (memory_id, revision, content, applicability, evidence_status, created_at) VALUES (?, ?, ?, NULL, 'unverified', ?)`)
-        .run(
-          change.memoryId,
-          expectedRevision,
-          String(current.content),
-          Number(current.updated_at),
-        );
+        .run(change.memoryId, baseRevision, String(current.content), Number(current.updated_at));
       this.database
         .prepare(`INSERT OR IGNORE INTO memory_revision_embeddings
         (memory_id, revision, model_id, dimensions, embedding)
         SELECT memory_id, memory_revision, model_id, dimensions, embedding FROM memory_embeddings
         WHERE memory_id = ? AND memory_revision = ?`)
-        .run(change.memoryId, expectedRevision);
+        .run(change.memoryId, baseRevision);
       // 来源集合发生变化时也发布新版本，旧版本的来源保持不变。
-      const previous = this.findRevision(change.memoryId, expectedRevision);
+      const previous = this.findRevision(change.memoryId, baseRevision);
       revision = resolveDreamingRevision(
         change,
-        { content: String(current.content), revision: expectedRevision },
+        { content: String(current.content), revision: baseRevision },
         previous,
-        this.listSources(change.memoryId, expectedRevision),
+        this.listSources(change.memoryId, baseRevision),
       );
-      if (revision === expectedRevision)
-        return { created: false, memoryId: change.memoryId, revision };
+      if (revision === baseRevision) return { created: false, memoryId: change.memoryId, revision };
       this.database
         .prepare(
           `UPDATE memories SET content = ?, normalized_content = ?, revision = ?, updated_at = ? WHERE id = ?`,
@@ -684,12 +743,12 @@ export class SqliteDreamingRepository {
           new Uint8Array(Float32Array.from(change.embedding.values).buffer),
         );
     }
-    if (expectedRevision !== null) {
+    if (baseRevision !== null) {
       // 新版本保留此前可追溯的来源。
       this.database
         .prepare(`INSERT INTO memory_revision_sources (memory_id, revision, session_id, run_id, event_id, event_seq)
         SELECT memory_id, ?, session_id, run_id, event_id, event_seq FROM memory_revision_sources WHERE memory_id = ? AND revision = ?`)
-        .run(revision, change.memoryId, expectedRevision);
+        .run(revision, change.memoryId, baseRevision);
     }
     for (const source of change.sources)
       this.database
@@ -729,38 +788,17 @@ export class SqliteDreamingRepository {
     }
   }
 
-  // 主 Agent 发布仅包含 Wiki 变化的新版本。
-  public publishWiki(input: {
-    workspaceId: string;
-    directoryId: string;
-    expectedDirectoryId: string | null;
-    now: number;
-  }): void {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      if ((this.findWiki(input.workspaceId)?.directoryId ?? null) !== input.expectedDirectoryId)
-        throw new Error("Dreaming Wiki changed");
-      this.saveWiki({
-        workspaceId: input.workspaceId,
-        directoryId: input.directoryId,
-        updatedAt: input.now,
-      });
-      this.database.exec("COMMIT");
-    } catch (error: unknown) {
-      this.database.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  // 将草案的记忆、来源、索引、Wiki 指针和 Run 状态作为一个事务发布。
+  // 将草案的记忆、来源、索引、上下文、Wiki 指针和 Run 状态作为一个事务发布。
   public publish(input: {
     workspaceId: string;
     directoryId: string;
+    contextDirectoryId: string;
     runId: string;
     runIds?: readonly string[];
     changes: DreamingMemoryChange[];
     references?: { memoryId: string; revision: number; isCurrent: boolean }[];
     expectedDirectoryId: string | null;
+    expectedContextDirectoryId: string | null;
     now: number;
   }): void {
     this.database.exec("BEGIN IMMEDIATE");
@@ -788,6 +826,12 @@ export class SqliteDreamingRepository {
       if ((this.findWiki(input.workspaceId)?.directoryId ?? null) !== input.expectedDirectoryId) {
         throw new Error("Dreaming Wiki changed");
       }
+      if (
+        (this.findContext(input.workspaceId)?.directoryId ?? null) !==
+        input.expectedContextDirectoryId
+      ) {
+        throw new Error("Dreaming context changed");
+      }
       const seen = new Set<string>();
       for (const reference of input.references ?? []) {
         const row = this.database
@@ -795,10 +839,9 @@ export class SqliteDreamingRepository {
             "SELECT revision FROM memories WHERE id = ? AND workspace_id = ? AND scope = 'workspace'",
           )
           .get(reference.memoryId, input.workspaceId);
-        if (!row || (reference.isCurrent && row.revision !== reference.revision))
-          throw new Error("Dreaming referenced memory changed");
+        if (!row) throw new Error("Dreaming referenced memory missing");
+        // 整理期间主 Agent 可能推进版本；只要引用版本仍存在即可发布。
         if (
-          !reference.isCurrent &&
           row.revision !== reference.revision &&
           !this.findRevision(reference.memoryId, reference.revision)
         ) {
@@ -819,6 +862,11 @@ export class SqliteDreamingRepository {
         workspaceId: input.workspaceId,
         directoryId: input.directoryId,
         updatedAt: input.now,
+      });
+      this.saveContext({
+        workspaceId: input.workspaceId,
+        directoryId: input.contextDirectoryId,
+        now: input.now,
       });
       for (const id of runIds) {
         this.database

@@ -24,11 +24,14 @@ import type { SqliteMemoryRepository } from "../storage/memory-repository.js";
 import type { SessionEventStore } from "../storage/session-event-store.js";
 import { selectRunEvents, textData } from "../utils/dreaming-events.js";
 import {
+  contextDirectory,
   DEFAULT_MEMORY_CONTEXT,
   EMPTY_WIKI_INDEX,
   ID_PATTERN,
+  readContextFile,
   readWiki,
   stripRecordedMemorySection,
+  validateContext,
   validateWiki,
 } from "../utils/dreaming-wiki.js";
 import type { GlobalDreamingService } from "./global-dreaming-service.js";
@@ -83,8 +86,7 @@ export class DreamingService {
       : AbortSignal.timeout(DREAMING_TIMEOUT_MS);
     signal.throwIfAborted();
     const settings = this.memories.getSettings();
-    if (!settings.useMemories || !settings.generateMemories)
-      throw new Error("Dreaming learning is disabled");
+    if (!settings.generateMemories) throw new Error("Dreaming learning is disabled");
     if (!this.dreaming.claimPendingRuns(runIds, input.workspaceId, Date.now()))
       throw new Error("Dreaming batch already claimed");
 
@@ -100,6 +102,7 @@ export class DreamingService {
     }
 
     let directory: string | null = null;
+    let contextDir: string | null = null;
     let published = false;
     try {
       const currentWiki = this.dreaming.findWiki(input.workspaceId);
@@ -110,9 +113,24 @@ export class DreamingService {
         currentWiki ? join(workspaceDir, currentWiki.directoryId) : null,
       );
       const originalFiles = new Map(files);
-      // 记忆结构尚未建立时，以空脚手架启动，由 Agent 根据本批原始日志搭建。
-      const bootstrap = !files.has("context.md") || !files.has("index.md");
-      if (!files.has("context.md")) files.set("context.md", DEFAULT_MEMORY_CONTEXT);
+      // 上下文和 Wiki 分开存储；任一结构缺失时由 Agent 根据原始日志搭建。
+      let expectedContextDirectoryId =
+        this.dreaming.findContext(input.workspaceId)?.directoryId ?? null;
+      let contextVersion = expectedContextDirectoryId
+        ? this.dreaming.findContextVersion(input.workspaceId, expectedContextDirectoryId)
+        : null;
+      if (expectedContextDirectoryId && contextVersion === null)
+        throw new Error("Dreaming context version not found");
+      const currentContext = expectedContextDirectoryId
+        ? await readContextFile(
+            contextDirectory(this.root, input.workspaceId, expectedContextDirectoryId),
+          )
+        : null;
+      const contextDraft = {
+        content: currentContext?.trim() ? currentContext : DEFAULT_MEMORY_CONTEXT,
+      };
+      const originalContext = contextDraft.content;
+      const bootstrap = !files.has("index.md") || expectedContextDirectoryId === null;
       if (!files.has("index.md")) files.set("index.md", EMPTY_WIKI_INDEX);
       const changes: DreamingMemoryChange[] = [];
       const globalCandidates: GlobalDreamingCandidate[] = [];
@@ -124,6 +142,7 @@ export class DreamingService {
         runs: runEvents,
         readRuns,
         files,
+        context: contextDraft,
         changes,
         globalCandidates,
         sessions: this.sessions,
@@ -181,30 +200,54 @@ export class DreamingService {
           }),
         );
         signal.throwIfAborted();
+        const last = agent.state.messages.at(-1);
+        if (last?.role !== "assistant" || last.stopReason !== "stop")
+          throw new Error("Dreaming consolidation failed");
+        // 整理期间主 Agent 可能发布新的上下文版本；让 Agent 对比后再发布。
+        for (let round = 0; round < 3; round += 1) {
+          const latest = this.dreaming.findContext(input.workspaceId)?.directoryId ?? null;
+          const latestVersion = latest
+            ? this.dreaming.findContextVersion(input.workspaceId, latest)
+            : null;
+          if (latest === expectedContextDirectoryId && latestVersion === contextVersion) break;
+          if (round === 2) throw new Error("Dreaming context changed");
+          const latestContent = latest
+            ? await readContextFile(contextDirectory(this.root, input.workspaceId, latest))
+            : null;
+          signal.throwIfAborted();
+          await agent.prompt(
+            JSON.stringify({
+              contextChanged: true,
+              contextVersion: latestVersion,
+              latestPublishedContext: latestContent?.trim()
+                ? latestContent
+                : DEFAULT_MEMORY_CONTEXT,
+              message:
+                "The published context changed after your snapshot. Compare latestPublishedContext with read_context. If it adds durable knowledge not yet covered, draft memory or update the context draft; if it is already covered, keep your draft. Do not re-read unrelated runs.",
+            }),
+          );
+          signal.throwIfAborted();
+          const after = agent.state.messages.at(-1);
+          if (after?.role !== "assistant" || after.stopReason !== "stop")
+            throw new Error("Dreaming consolidation failed");
+          expectedContextDirectoryId = latest;
+          contextVersion = latestVersion;
+        }
       } finally {
         signal.removeEventListener("abort", abort);
       }
-      const last = agent.state.messages.at(-1);
-      if (last?.role !== "assistant" || last.stopReason !== "stop")
-        throw new Error("Dreaming consolidation failed");
       if (!runIds.every((runId) => readRuns.has(runId)))
         throw new Error("Dreaming agent did not review every run");
 
       // 临时区块已由 Agent 融入正式记忆，发布版本必须移除它。
-      const context = files.get("context.md");
-      if (context !== undefined) {
-        const stripped = stripRecordedMemorySection(context);
-        files.set("context.md", stripped.trim() ? stripped : DEFAULT_MEMORY_CONTEXT);
-      }
+      const stripped = stripRecordedMemorySection(contextDraft.content);
+      const contextContent = stripped.trim() ? stripped : DEFAULT_MEMORY_CONTEXT;
+      validateContext(contextContent, files);
       const hasMemoryChanges = changes.some((change) => {
         if (change.expectedRevision === null) return true;
         const memory = this.memoryStore.find(change.memoryId);
-        if (
-          !memory ||
-          memory.workspaceId !== input.workspaceId ||
-          memory.revision !== change.expectedRevision
-        )
-          return true;
+        if (!memory || memory.workspaceId !== input.workspaceId) return true;
+        // 以最新版本判断是否需要更新，兼容整理期间的并发写入。
         return (
           resolveDreamingRevision(
             change,
@@ -216,6 +259,8 @@ export class DreamingService {
       });
       if (
         !hasMemoryChanges &&
+        contextContent === originalContext &&
+        expectedContextDirectoryId !== null &&
         files.size === originalFiles.size &&
         [...files].every(([name, content]) => originalFiles.get(name) === content)
       ) {
@@ -257,15 +302,24 @@ export class DreamingService {
       await mkdir(directory, { recursive: true });
       for (const [name, content] of files)
         await writeFile(join(directory, name), content, { encoding: "utf8", signal });
+      const contextDirectoryId = randomUUID();
+      contextDir = contextDirectory(this.root, input.workspaceId, contextDirectoryId);
+      await mkdir(contextDir, { recursive: true });
+      await writeFile(join(contextDir, "context.md"), contextContent, {
+        encoding: "utf8",
+        signal,
+      });
       signal.throwIfAborted();
       this.dreaming.publish({
         workspaceId: input.workspaceId,
         directoryId,
+        contextDirectoryId,
         runId: first.runId,
         runIds,
         changes,
         references,
         expectedDirectoryId: currentWiki?.directoryId ?? null,
+        expectedContextDirectoryId,
         now: Date.now(),
       });
       published = true;
@@ -274,6 +328,7 @@ export class DreamingService {
       if (!published) {
         this.dreaming.failConsolidation(runIds, Date.now());
         if (directory) await rm(directory, { recursive: true, force: true });
+        if (contextDir) await rm(contextDir, { recursive: true, force: true });
       }
       throw error;
     }

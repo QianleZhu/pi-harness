@@ -15,14 +15,13 @@ import {
 import type { SqliteDreamingRepository } from "../storage/dreaming-repository.js";
 import type { SqliteMemoryRepository } from "../storage/memory-repository.js";
 import {
+  contextDirectory,
   DEFAULT_MEMORY_CONTEXT,
-  EMPTY_WIKI_INDEX,
   ID_PATTERN,
-  readWiki,
+  readContextFile,
 } from "../utils/dreaming-wiki.js";
 
 const CONTEXT_BUDGET = 2_000;
-const INDEX_BUDGET = 4_000;
 
 function normalizeContent(content: string): string {
   const trimmed = content.trim().replaceAll(/\s+/g, " ");
@@ -62,7 +61,7 @@ function appendContextEntry(context: string, content: string): string | null {
   return next.length <= CONTEXT_BUDGET ? next : null;
 }
 
-// 主 Agent 写入工作区记忆摘要，并同步追加第一层临时入口。
+// 主 Agent 写入工作区记忆摘要，并生成新的上下文版本副本。
 export class MemoryRecorderService implements MemoryRecorder {
   public constructor(
     private readonly root: string,
@@ -103,81 +102,48 @@ export class MemoryRecorderService implements MemoryRecorder {
     return { ...result, contextUpdated };
   }
 
-  // 原地追加到当前发布目录；仅在首次创建 Wiki 时发布一个版本。
+  // 追加到最新上下文副本并发布新版本；已发布副本保持不变。
   private async updateContext(
     workspaceId: string,
     content: string,
     signal?: AbortSignal,
   ): Promise<boolean> {
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const current = this.dreaming.findWiki(workspaceId);
-      if (!current) {
-        if (await this.createInitialContext(workspaceId, content, signal)) return true;
-        continue;
-      }
-      if (!ID_PATTERN.test(current.directoryId)) throw new Error("Invalid Wiki directory");
-      const directory = join(this.root, "dreaming", workspaceId, current.directoryId);
-      const files = await readWiki(directory);
-      const index = files.get("index.md") ?? EMPTY_WIKI_INDEX;
-      if (index.length > INDEX_BUDGET) return false;
-      const existingContext = files.get("context.md")?.trim()
-        ? (files.get("context.md") ?? "")
-        : DEFAULT_MEMORY_CONTEXT;
-      const context = appendContextEntry(existingContext, content);
+      signal?.throwIfAborted();
+      const current = this.dreaming.findContext(workspaceId);
+      const existing = current
+        ? await readContextFile(contextDirectory(this.root, workspaceId, current.directoryId))
+        : null;
+      const base = existing?.trim() ? existing : DEFAULT_MEMORY_CONTEXT;
+      const context = appendContextEntry(base, content);
       if (context === null) return false;
-      if (context === existingContext) return true;
-      // Dreaming 可能并发切换发布目录，写入前后都要确认指针未变化。
-      if ((this.dreaming.findWiki(workspaceId)?.directoryId ?? null) !== current.directoryId)
-        continue;
-      await writeFile(join(directory, "context.md"), context, {
-        encoding: "utf8",
-        ...(signal ? { signal } : {}),
-      });
-      if (!files.has("index.md"))
-        await writeFile(join(directory, "index.md"), EMPTY_WIKI_INDEX, {
+      if (context === base) return true;
+      const directoryId = randomUUID();
+      const directory = contextDirectory(this.root, workspaceId, directoryId);
+      await mkdir(directory, { mode: 0o700, recursive: true });
+      try {
+        await writeFile(join(directory, "context.md"), context, {
           encoding: "utf8",
+          mode: 0o600,
           ...(signal ? { signal } : {}),
         });
-      signal?.throwIfAborted();
-      if ((this.dreaming.findWiki(workspaceId)?.directoryId ?? null) === current.directoryId)
-        return true;
-    }
-    throw new Error("Dreaming Wiki changed");
-  }
-
-  // 首次记录时创建最小 Wiki，并发布唯一的初始版本。
-  private async createInitialContext(
-    workspaceId: string,
-    content: string,
-    signal?: AbortSignal,
-  ): Promise<boolean> {
-    const context = appendContextEntry(DEFAULT_MEMORY_CONTEXT, content);
-    if (context === null) return false;
-    const directoryId = randomUUID();
-    const directory = join(this.root, "dreaming", workspaceId, directoryId);
-    await mkdir(directory, { recursive: true });
-    try {
-      await writeFile(join(directory, "context.md"), context, {
-        encoding: "utf8",
-        ...(signal ? { signal } : {}),
-      });
-      await writeFile(join(directory, "index.md"), EMPTY_WIKI_INDEX, {
-        encoding: "utf8",
-        ...(signal ? { signal } : {}),
-      });
-      signal?.throwIfAborted();
-      this.dreaming.publishWiki({
-        workspaceId,
-        directoryId,
-        expectedDirectoryId: null,
-        now: Date.now(),
-      });
-      return true;
-    } catch (error: unknown) {
+        signal?.throwIfAborted();
+        if (
+          this.dreaming.publishContext({
+            workspaceId,
+            directoryId,
+            expectedDirectoryId: current?.directoryId ?? null,
+            now: Date.now(),
+          })
+        )
+          return true;
+      } catch (error: unknown) {
+        await rm(directory, { recursive: true, force: true });
+        throw error;
+      }
       await rm(directory, { recursive: true, force: true });
-      if (error instanceof Error && error.message === "Dreaming Wiki changed") return false;
-      throw error;
     }
+    throw new Error("Dreaming context changed");
   }
 
   // 向量失败时保留关键词召回，不阻止记忆写入。

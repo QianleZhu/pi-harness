@@ -110,9 +110,12 @@ export interface MemoryRepository {
   updateSettings(settings: MemorySettings, updatedAt: number): void;
 }
 
-// Run 固定 Wiki 版本和每条可见记忆的当前版本。
+// Run 固定开关、上下文、Wiki 版本和每条可见记忆的当前版本。
 export interface RunMemorySnapshot {
   workspaceId: string;
+  settings?: MemorySettings;
+  contextDirectoryId: string | null;
+  contextVersion: number | null;
   wikiDirectoryId: string | null;
   wikiVersion: number | null;
   versions: ReadonlyMap<string, number>;
@@ -124,6 +127,7 @@ export interface RunMemorySnapshot {
 // 主 Agent 读取已发布的 Dreaming 内容，具体存储由 daemon 提供。
 export interface DreamingReader {
   captureSnapshot(workspaceId: string): RunMemorySnapshot;
+  readContext(workspaceId: string, snapshot?: RunMemorySnapshot): Promise<string | null>;
   readGlobalContext(snapshot?: RunMemorySnapshot): string | null;
   readWiki(
     workspaceId: string,
@@ -258,28 +262,41 @@ export class MemoryService implements MemoryRuntime {
     private readonly recorder?: MemoryRecorder,
   ) {}
 
-  // 为主 Run 固定记忆和 Wiki 的发布版本。
+  // 为主 Run 固定开关状态、记忆和 Wiki 的发布版本；运行中途切换开关不影响本次 Run。
   public captureSnapshot(workspaceId: string): RunMemorySnapshot | null {
-    if (!this.repository.getSettings().useMemories || !this.dreaming)
+    const settings = this.repository.getSettings();
+    if (!settings.useMemories || !this.dreaming)
       return {
         workspaceId,
+        settings,
+        contextDirectoryId: null,
+        contextVersion: null,
         wikiDirectoryId: null,
         wikiVersion: null,
         versions: new Map(),
         globalMemories: [],
         workspaceMemories: [],
       };
-    return this.dreaming.captureSnapshot(workspaceId);
+    return {
+      ...this.dreaming.captureSnapshot(workspaceId),
+      settings,
+    };
   }
 
-  // 关闭记忆使用时不读取已发布的 Wiki 或来源。
+  private canUseMemories(snapshot?: RunMemorySnapshot | null): boolean {
+    return snapshot?.settings
+      ? snapshot.settings.useMemories
+      : this.repository.getSettings().useMemories;
+  }
+
+  // 关闭记忆使用时不读取已发布的 Wiki 或来源；已有 Run 按启动时固定的开关继续执行。
   public async readWiki(
     workspaceId: string,
     name: string,
     signal?: AbortSignal,
     snapshot?: RunMemorySnapshot | null,
   ): Promise<string | null> {
-    if (!this.repository.getSettings().useMemories || !this.dreaming) return null;
+    if (!this.canUseMemories(snapshot) || !this.dreaming) return null;
     return this.dreaming.readWiki(workspaceId, name, signal, snapshot ?? undefined);
   }
 
@@ -290,7 +307,7 @@ export class MemoryService implements MemoryRuntime {
     revision: number,
     snapshot?: RunMemorySnapshot | null,
   ): unknown {
-    if (!this.repository.getSettings().useMemories || !this.dreaming) return null;
+    if (!this.canUseMemories(snapshot) || !this.dreaming) return null;
     return this.dreaming.readRevision(workspaceId, memoryId, revision, snapshot ?? undefined);
   }
 
@@ -304,7 +321,7 @@ export class MemoryService implements MemoryRuntime {
     signal?: AbortSignal,
     snapshot?: RunMemorySnapshot | null,
   ): Promise<unknown> {
-    if (!this.repository.getSettings().useMemories || !this.dreaming) return null;
+    if (!this.canUseMemories(snapshot) || !this.dreaming) return null;
     return this.dreaming.readSource(
       workspaceId,
       memoryId,
@@ -316,20 +333,22 @@ export class MemoryService implements MemoryRuntime {
     );
   }
 
-  // 主 Agent 仅在允许学习时写入第三层记忆摘要。
-  public recordMemory(input: RecordMemoryInput, signal?: AbortSignal): Promise<RecordedMemory> {
-    return this.withMutation(() => {
-      this.assertLearningEnabled();
-      if (!this.recorder)
-        throw new MemoryError(MemoryErrorCode.INVALID, "当前运行未配置记忆写入能力");
-      return this.recorder.record(input, signal);
-    });
+  // 主 Agent 仅在开启生成记忆时写入；在进入写入队列前同步校验开关，避免中断已发起的写入。
+  public async recordMemory(
+    input: RecordMemoryInput,
+    signal?: AbortSignal,
+  ): Promise<RecordedMemory> {
+    this.assertLearningEnabled();
+    if (!this.recorder)
+      throw new MemoryError(MemoryErrorCode.INVALID, "当前运行未配置记忆写入能力");
+    const recorder = this.recorder;
+    return this.withMutation(() => recorder.record(input, signal));
   }
 
   private assertLearningEnabled(): void {
     const settings = this.repository.getSettings();
-    if (!settings.useMemories || !settings.generateMemories)
-      throw new MemoryError(MemoryErrorCode.LEARNING_DISABLED, "已关闭从对话中学习记忆");
+    if (!settings.generateMemories)
+      throw new MemoryError(MemoryErrorCode.LEARNING_DISABLED, "已关闭生成记忆");
   }
 
   public getState(): MemoryState {
@@ -437,12 +456,11 @@ export class MemoryService implements MemoryRuntime {
     }
   }
 
-  public updateSettings(input: UpdateMemorySettingsInput): Promise<MemorySettings> {
-    return this.withMutation(() => {
-      const settings = { ...this.repository.getSettings(), ...input };
-      this.repository.updateSettings(settings, Date.now());
-      return settings;
-    });
+  // 开关更新是同步 SQLite 事务，不排入慢速写入队列，避免阻塞正在执行的记忆写入或嵌入计算。
+  public async updateSettings(input: UpdateMemorySettingsInput): Promise<MemorySettings> {
+    const settings = { ...this.repository.getSettings(), ...input };
+    this.repository.updateSettings(settings, Date.now());
+    return settings;
   }
 
   public async search(
@@ -477,8 +495,7 @@ export class MemoryService implements MemoryRuntime {
     const normalizedQuery = query.trim();
     if (!normalizedQuery) throw new MemoryError(MemoryErrorCode.INVALID, "检索内容不能为空");
     this.assertWorkspace(workspaceId);
-    const settings = this.repository.getSettings();
-    if (requireMemoryUse && !settings.useMemories) return [];
+    if (requireMemoryUse && !this.canUseMemories(snapshot)) return [];
     const resultLimit = Math.min(Math.max(limit, 1), 50);
     const candidateLimit = Math.max(
       MIN_HYBRID_CANDIDATES,
@@ -531,27 +548,26 @@ export class MemoryService implements MemoryRuntime {
     }
   }
 
-  // 使用 Run 固定的 Wiki 上下文，不在启动时检索用户提问。
+  // 使用 Run 固定的开关与上下文版本，不在启动时检索用户提问，也不因中途切换开关截断本次组装。
   public async buildContext(
     workspaceId: string,
-    signal?: AbortSignal,
+    _signal?: AbortSignal,
     snapshot?: RunMemorySnapshot | null,
   ): Promise<string> {
     this.assertWorkspace(workspaceId);
-    const settings = this.repository.getSettings();
-    const wikiContext = settings.useMemories
-      ? await this.readWiki(workspaceId, "context.md", signal, snapshot)
-      : null;
+    const settings = snapshot?.settings ?? this.repository.getSettings();
+    const context =
+      settings.useMemories && this.dreaming
+        ? await this.dreaming.readContext(workspaceId, snapshot ?? undefined)
+        : null;
     const globalContext =
       settings.useMemories && this.dreaming
         ? this.dreaming.readGlobalContext(snapshot ?? undefined)
         : null;
-    // 读取期间开关可能发生变化，关闭后不注入已读取的内容。
-    const currentSettings = this.repository.getSettings();
     return buildMemoryContextPrompt(
-      currentSettings,
-      currentSettings.useMemories ? wikiContext : null,
-      currentSettings.useMemories ? globalContext : null,
+      settings,
+      settings.useMemories ? context : null,
+      settings.useMemories ? globalContext : null,
     );
   }
 

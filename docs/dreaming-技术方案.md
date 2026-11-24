@@ -2,14 +2,16 @@
 
 ## 目标
 
-Dreaming 在 daemon 管理的独立 Worker 进程中，由一个带工具的 Agent 统一审计工作区已结束的 Run。Agent 按需读取原始日志、当前注入上下文、Wiki 和记忆摘要，修正矛盾、冲突和过时内容，并维护四层记忆结构。
+Dreaming 在 daemon 管理的独立 Worker 进程中，由一个带工具的 Agent 统一审计工作区已结束的 Run。Agent 按需读取原始日志、当前注入上下文、Wiki 和记忆摘要，修正矛盾、冲突和过时内容，并维护工作区的四层正式记忆结构。
 
-主 Agent 在工作过程中可通过 `record_memory` 记录临时有用的工作区记忆。Dreaming 后续用原始日志佐证这些记录，决定保留、修正或拒绝。工作区整理 Agent 可提出跨项目候选，由单独的全局 Agent 串行处理；两者均可不产生变更。
+主 Agent 在工作过程中可通过 `record_memory` 记录当前工作区的临时记忆到独立的在线暂存表 `provisional_memories`。Dreaming 后续用原始日志佐证这些暂存记录，决定提拔为正式记忆或拒绝。工作区整理 Agent 可提出跨项目候选，由单独的全局 Agent 串行处理；两者均可不产生变更。
+
+用户个性与跨项目全局记忆拆分为两类独立业务：用户个性使用独立表，仅由用户在 Web UI 手动输入、更新与删除；全局记忆只记录跨项目内容，由 Web UI 与全局整理 Agent 共同维护；工作区正式记忆（L1/L2/L3）仅由 Dreaming Worker 独占写入，Web UI 不查看或修改工作区记忆。
 
 ## 记忆分层
 
 ```text
-注入上下文：核心摘要、导航入口，以及 ## 当前运行记录的长期记忆 临时区块
+注入上下文：Dreaming 发布的正式 context.md + Run 启动时内存拼装的同 Session 待审暂存区块
         ↓ 按需读取
 主题 Wiki：跨记忆的归纳、适用条件和主题关联
         ↓ 引用
@@ -18,16 +20,19 @@ Dreaming 在 daemon 管理的独立 Worker 进程中，由一个带工具的 Age
 Session JSONL：原始对话、工具调用和结果
 ```
 
+注入上下文和 Wiki 分开存储与版本化：上下文是独立版本副本，Wiki 是 `index.md` 与主题文件的目录版本；在线暂存笔记独立存放在 SQLite 的 `provisional_memories` 表中。
+
 | 层次 | 内容 | 存储与职责 |
 | --- | --- | --- |
 | 会话事件 | 已持久化的对话及执行记录 | Session JSONL 是原始事实来源 |
-| 记忆摘要 | 可跨 Session 复用的项目事实、决策、经验和教训 | SQLite `memories`、`memory_revisions`、`memory_revision_sources` |
+| 记忆摘要 | 可跨 Session 复用的项目事实、决策、经验和教训 | SQLite `memories`、`memory_revisions`、`memory_revision_sources`（工作区正式记忆仅由 Dreaming 写入） |
 | Wiki 与导航 | 对摘要的主题组织和综合结论 | daemon 数据目录按 workspace 保存 Markdown 文件，可由摘要重新整理 |
-| 注入上下文 | 从 Wiki 提取的核心摘要和导航 | 当前发布目录的 `context.md`，供主 Agent 的后续 Run 使用 |
+| 注入上下文 | 从 Wiki 提取的核心摘要和导航 | 独立的 `dreaming_context` 指针与 `dreaming_context_versions` 版本，内容保存为纯正式 Markdown 副本，仅由 Dreaming 写入 |
+| 在线暂存笔记 | Run 过程中主动记录、尚未审计的临时工作区记忆 | SQLite `provisional_memories`（Append-Only，绑定 `workspace_id`、`session_id`、`run_id` 与处理状态） |
 
-`record_memory` 只写入当前 workspace 的第三层记忆，并在 `context.md` 末尾追加独立的 `## 当前运行记录的长期记忆` 区块。该区块只保存内容，不维护主题 Wiki。
+`record_memory` 只向 `provisional_memories` 追加一条 `pending` 记录，不写入正式 `memories` 表，也不修改磁盘上的 `context.md` 或 Wiki。同一 Session 的后续 Run 在启动拍快照时，只要暂存记录已落表就立即可见，并在内存中拼装进发给主 Agent 的上下文（独立小预算，超出预算按关键词降级检索，不建向量索引）；不同 Session 之间的未审计暂存记录在 Dreaming 前互相隔离。
 
-Dreaming 发布新版本时必须移除这个临时区块：Agent 根据日志判断条目是否值得保留，支持则写入正式记忆，不支持则拒绝。旧版本保持原样。
+Dreaming 启动时原子认领本工作区当前所有 `pending` 暂存记录（包含本批 Run 以及此前失败批次遗留的待审条目）；审计后在发布事务中仅更新本批认领记录的状态（`promoted` / `rejected`）。Dreaming 运行期间新会话写入的暂存记录不在认领集合内，互不冲突并留待下一轮 Dreaming 审核。
 
 ## 系统职责
 
@@ -45,11 +50,21 @@ Dreaming 不创建顶层会话，不将 Pi 原始事件暴露给 Web。后台提
 
 ## 开关与模型配置
 
-沿用 `generateMemories` 和 `useMemories`：只有允许使用记忆且开启从对话中学习时，才安排新的 Dreaming 工作；关闭使用记忆时，主 Agent 不注入或读取记忆。
+`useMemories`（使用记忆）和 `generateMemories`（生成记忆）两个开关完全独立，按 2×2 组合生效：
+
+- **仅开 `useMemories`**：正常注入与检索当前已有记忆结构（用户个性、全局记忆、工作区四层与同 Session 暂存）；禁用对话中的记忆写入工具（包括 Agent 主动调用和用户对话要求调用）与新的 Dreaming 调度。
+- **仅开 `generateMemories`**：不注入任何记忆上下文，不使用记忆读取/检索工具；正常允许记忆写入工具与后台 Dreaming（Dreaming 整理自身可读取已有记忆和 Wiki 以完成比对与更新）。
+- **两个都开**：读取、写入与整理全部执行。
+- **两个都关**：读取、写入与整理全部不执行。
+
+所有开关变更遵循**“不影响正在进行的操作，只对下一次生效”**：
+
+- Run 启动拍 `RunMemorySnapshot` 时固定本次 Run 的 `useMemories`，运行中途关闭开关不中断本次 Run 已开始的上下文组装与记忆读取，新状态在下一次 Run 生效。
+- 已进入执行的记忆写入工具调用完整写完；下一次调用按新 `generateMemories` 状态判定。
+- 已启动的工作区 Dreaming 批次与全局 Dreaming 批次继续执行完毕并正常发布；关闭开关后不再启动新的整理批次。
+- `generateMemories = true` 时发起的 Run 正常登记进 `dreaming_runs`，结束时一律转为 `pending`（即使中途关闭了开关，也不再因跨开关边界将其跳过）；关闭期间已有 `pending` Run 保持待处理，等重新开启 `generateMemories` 后随空闲条件一并整理。
 
 Dreaming 使用独立的 Provider 和模型，分析与整理共用。模型未配置、Provider 不可用或凭据缺失时，不启动整理，符合条件的 Run 保持待处理；模型调用开始后失败或超时，该批 Run 记为失败，不重试。
-
-第一次生效时记录开启边界，不回溯历史 Run。每次重新开启建立新的开启区间；只有在同一开启区间内开始并结束的 Run 可参与整理，跨越开关边界的 Run 跳过。关闭开关后不启动新的整理批次，已经开始的批次继续完成；重新开启不补处理关闭期间的 Run。
 
 Dreaming 执行期间拒绝修改或清除专用模型，以及会触发 Provider 配置刷新的操作，并向用户提示。
 
@@ -57,11 +72,11 @@ Dreaming 执行期间拒绝修改或清除专用模型，以及会触发 Provide
 
 处理单位是已结束的顶层 Run。成功、失败和中止的 Run 都可整理；失败和中止的上下文必须保留原有状态。
 
-定时扫描没有活动 Run、最近会话活动已过去 30 分钟且符合开启边界的待处理 Run。按 workspace 收集该工作区的全部符合条件 Run，交给同一个 Dreaming Agent；Run 按 `session_id`、开始时间排序，依次处理每个 Session 内的 Run。同一 workspace 同时只有一个 Dreaming Agent，不同 workspace 最多两个并发。
+定时扫描 `generateMemories = true` 时的待处理 Run。触发条件为**整个 Workspace 不存在任何活动 Session，且该 Workspace 下所有 Session 的最后一次持久化事件距今均已空闲至少 30 分钟**。满足条件后，按 workspace 收集该工作区的全部 `pending` Run，并在同一 `BEGIN IMMEDIATE` 事务中原子认领这些 Run 以及该工作区当前所有 `status = 'pending'` 的 `provisional_memories`（含此前失败批次遗留的待审条目），交给同一个 Dreaming Agent；Run 按 `session_id`、开始时间排序，依次处理每个 Session 内的 Run。同一 workspace 同时只有一个 Dreaming Agent，不同 workspace 最多两个并发。
 
 Run 结束、记忆开关变化和整理任务结束不触发立即扫描；下一次定时检查在上次检查完成后等待固定间隔。整理执行期间拒绝修改或清除专用模型，并拒绝会触发 Provider 配置刷新的操作。
 
-调度记录区分待整理、整理中、已完成、失败和跳过，并关联 workspace、Session 与 Run。整理成功后清除本批 Run 记录中的旧候选字段；整理失败时不提交草案，本批 Run 标记失败，不重试。
+调度记录区分待整理、整理中、已完成、失败和跳过，并关联 workspace、Session 与 Run。整理成功后清除本批 Run 记录中的旧候选字段并关闭本批认领的暂存记录状态；整理失败时不提交草案，本批 Run 标记失败且不重试，本批认领的暂存记录保持 `pending` 留待下次正常 Dreaming 顺带审核。
 
 daemon 停止时取消运行中的后台调用；重启后尚未开始的 Run 继续等待调度，中断的整理批次标记失败，不重新执行。
 
@@ -80,7 +95,7 @@ daemon 停止时取消运行中的后台调用；重启后尚未开始的 Run �
 
 初始输入不包含完整事件、全部记忆或完整 Wiki，避免一次性压入上下文。
 
-工作区还没有可用记忆结构（缺少 `context.md` 或 `index.md`）时，Agent 以默认脚手架启动，并按追加的引导提示从本批原始日志搭建初始结构：先用 `draft_memory` 建立有事件来源的记忆，再写 `context.md`、`index.md` 和主题文件。脚手架视为空结构而不是既有知识；即使没有记忆变更，只要初始结构是本次新建的，也会发布新的 Wiki 版本。日志中没有值得保留的知识时，保持空脚手架并正常完成。
+工作区还没有可用记忆结构（缺少上下文版本或 `index.md`）时，Agent 以默认脚手架启动，并按追加的引导提示从本批原始日志搭建初始结构：先用 `draft_memory` 建立有事件来源的记忆，再用 `write_context` 写注入上下文、用 `write_wiki` 写 `index.md` 和主题文件。脚手架视为空结构而不是既有知识；即使没有记忆变更，只要初始结构是本次新建的，也会发布新的上下文和 Wiki 版本。日志中没有值得保留的知识时，保持空脚手架并正常完成。
 
 ### 工具与按需读取
 
@@ -90,10 +105,12 @@ daemon 停止时取消运行中的后台调用；重启后尚未开始的 Run �
 - `list_memories`：分页浏览 workspace 记忆。
 - `search_memories`：按关键词与向量混合检索记忆。
 - `read_memory`：读取记忆、版本和来源。
-- `read_wiki`：读取 `context.md`、`index.md` 或主题；不传文件名时列出文件。
+- `read_wiki`：读取 `index.md` 或主题；不传文件名时列出文件。
+- `read_context`：读取当前注入上下文草案。
 - `draft_memory`：用已读取的事件 ID 起草记忆变更。
 - `propose_global_memory`：提交跨项目候选。
-- `write_wiki`：写入 `context.md`、`index.md` 或主题草案。
+- `write_wiki`：写入 `index.md` 或主题草案。
+- `write_context`：替换注入上下文草案。
 
 写入工具只更新本批草案，不直接修改正式记录。
 
@@ -134,39 +151,44 @@ Agent 对照当前记忆、Wiki、注入上下文和 Run 日志，处理以下�
 
 Agent 完成后：
 
-1. 强制从 `context.md` 移除 `## 当前运行记录的长期记忆` 区块；
-2. 校验 Wiki 文件名、预算、导航和 `[memory:ID@REVISION]` 引用；
-3. 准备记忆 embedding，失败时退化为关键词召回；
-4. 写入新的 Wiki 目录；
-5. 在一个 SQLite 事务中更新记忆、版本、来源、索引、Wiki 指针和 Run 状态。
+1. 分别校验上下文预算与导航，以及 Wiki 文件名、预算、导航和 `[memory:ID@REVISION]` 引用；
+2. 准备记忆 embedding，失败时退化为关键词召回；
+3. 写入新的 Wiki 目录和新的上下文目录；
+4. 在一个 SQLite 事务中更新记忆、版本、来源、索引、上下文指针、Wiki 指针、Run 状态，以及仅将本批认领的 `provisional_memories` 标记为 `promoted` 或 `rejected`。
 
-没有记忆或 Wiki 实际变化时不创建新版本。只有临时区块被删除也算变化，会创建新版本。
+没有记忆、上下文、Wiki 或暂存记录变化时不创建新版本。如果本批仅拒绝了暂存记录而未改变正式记忆、上下文或 Wiki，则只更新 Run 与暂存记录状态，不创建新版本。
+
+由于工作区正式 L1/L2/L3 仅由 Dreaming Worker 单写者维护，且在线 `record_memory` 只追加写入 `provisional_memories`，Dreaming 运行期间新进入会话的写入与本次发布完全隔离，不再需要发布前的上下文版本比对循环与临时区块剥离逻辑。
 
 ## 全局记忆 Agent
 
-工作区整理 Agent 可以调用 `propose_global_memory` 提出跨项目候选。候选进入 Worker 内存队列，由一个全局 Agent 串行分批处理。
+工作区整理 Agent 可以调用 `propose_global_memory` 提出跨项目候选（仅限跨项目通用经验，不涉及用户个性）。候选进入 Worker 内存队列，由一个全局 Agent 串行分批处理。
 
 全局 Agent：
 
-- 复用 Dreaming 模型和开关，并使用同一套上下文压缩机制；
-- 通过 `inspect_global_memories` 分页比较当前 `user` 记忆、版本和来源；
-- 通过 `draft_global_memory` 创建、修改或补充来源；
+- 复用 Dreaming 模型与 `generateMemories` 开关（不受 `useMemories` 耦合），并使用同一套上下文压缩机制；
+- 通过 `inspect_global_memories` 分页比较当前跨项目全局记忆、版本和来源；
+- 通过 `draft_global_memory` / 撤销草案工具创建、修改、覆盖或撤销本批草案；
 - 冲突或修正时更新已有记忆，不重复创建；
 - 没有值得变更的候选时不调用写入工具。
 
-全局发布使用 `global_memory_versions` 保存不可变副本；用户修改或全局整理产生变更时生成新版本。整理期间用户修改导致版本冲突时，候选重新排队。
+全局发布使用 `global_memory_versions` 保存跨项目全局记忆的不可变副本（与独立表 `user_profiles` 完全解耦）。整理开始时记录 `baseVersion`；准备写入时再次比较最新版本号：若版本未变则直接原子提交；若期间用户在 Web UI 修改了全局记忆导致版本变化，则计算 `baseVersion → latestVersion` 的精确结构化 diff（新增、修改、删除），切换工具视图至最新版本并由全局 Agent 与当前草案进行**增量合并**（用户修改权威更高，冲突内容以用户为准，用户已删除内容不复活），随后再以最新版本号执行乐观锁提交。
 
 ## 存储与提交
 
 SQLite 表：
 
-- `memories`：当前有效记忆；
+- `user_profiles`：用户个性独立表，仅由用户在 Web UI 手动维护，不参与 Dreaming 与 `global_memory_versions`；
+- `provisional_memories`：工作区在线暂存表（Append-Only，按 `workspace_id`、`session_id`、`run_id`、`status` 管理）；
+- `memories`：当前有效长期记忆（`scope = 'user'` 仅保存跨项目全局记忆，`scope = 'workspace'` 仅由 Dreaming 维护）；
 - `memory_revisions`：按记忆 ID 和版本保存正文、适用条件与证据状态；
 - `memory_revision_sources`：关联记忆版本与 Session、Run、事件 ID 和序号；
-- `dreaming_wiki`：workspace 当前发布目录指针；
+- `dreaming_wiki`：workspace 当前发布 Wiki 目录指针；
 - `dreaming_wiki_versions`：已发布 Wiki 目录及版本；
-- `dreaming_runs`：Run 归属、开启代次、状态和时间；
-- `global_memory_versions`：全局记忆发布副本。
+- `dreaming_context`：workspace 当前发布上下文目录指针；
+- `dreaming_context_versions`：已发布上下文目录及版本；
+- `dreaming_runs`：Run 归属、状态和时间；
+- `global_memory_versions`：跨项目全局记忆发布副本。
 
 版本语义：
 
@@ -174,11 +196,12 @@ SQLite 表：
 - 已有记忆内容、适用条件、证据状态或来源变化时 revision + 1；
 - 一次 Dreaming 发布中，每个受影响的记忆最多 +1；
 - 未变化的记忆 revision 不变；
-- 每次实际发布创建一个新的 Wiki 目录，`dreaming_wiki_versions.version` + 1。
+- 每次实际发布创建一个新的 Wiki 目录，`dreaming_wiki_versions.version` + 1；
+- 每次上下文实际变化创建一个新的上下文副本，`dreaming_context_versions.version` + 1。
 
 发布事务失败时旧目录和旧版本继续生效，新目录作为未发布草案清理。旧版本目录和记忆版本保持不变。
 
-Wiki 存放在 daemon 数据目录的 `dreaming/<workspaceId>/<directoryId>/` 下，不写入用户 workspace。主 Agent 在每个 Run 启动时固定 Wiki 和可见记忆版本；后台发布不改变正在运行的 Run。
+Wiki 存放在 daemon 数据目录的 `dreaming/<workspaceId>/<directoryId>/` 下，上下文副本存放在 `dreaming/<workspaceId>/contexts/<directoryId>/context.md`，均不写入用户 workspace。主 Agent 在每个 Run 启动时分别固定上下文版本、Wiki 版本和可见记忆版本；后台发布不改变正在运行的 Run。
 
 本地 embedding 不可用时沿用关键词召回退化行为。索引作为可重建派生数据维护。
 
@@ -216,11 +239,13 @@ Wiki 存放在 daemon 数据目录的 `dreaming/<workspaceId>/<directoryId>/` �
 已实现：
 
 - 四层记忆存储、版本、来源和 Wiki 发布版本；
-- `record_memory` 写入第三层并追加第一层临时区块；
-- 一个 workspace 一个 Dreaming Agent，按需分页读取 Run、记忆和 Wiki；
+- 注入上下文独立存储，拥有自己的版本、不可变副本和发布指针；
+- `record_memory` 写入第三层并发布新的上下文副本，不修改 Wiki；
+- 一个 workspace 一个 Dreaming Agent，按需分页读取 Run、记忆、上下文和 Wiki；
 - 复用 `projectContext` 上下文压缩；
 - 记忆确认、修正、冲突、过时和临时条目处理；
 - 发布前移除临时区块，新版本不包含临时记忆；
+- 发布前比较上下文版本，必要时让 Agent 对比最新内容后继续；
 - 全局记忆 Agent 与全局发布版本；
 - 独立 Worker、30 分钟空闲触发、失败和重启恢复。
 

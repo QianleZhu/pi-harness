@@ -98,7 +98,7 @@ export class DreamingScheduler {
     }
     if (this.controller.signal.aborted) return;
     const settings = this.memories.getSettings();
-    if (!settings.useMemories || !settings.generateMemories) return;
+    if (!settings.generateMemories) return;
     if (this.globalService && !this.isGlobalActive && this.globalService.hasPending()) {
       this.isGlobalActive = true;
       this.track(

@@ -12,7 +12,11 @@ import type { SqliteDreamingRepository } from "../storage/dreaming-repository.js
 import type { SqliteMemoryRepository } from "../storage/memory-repository.js";
 import type { SessionEventStore } from "../storage/session-event-store.js";
 import { textData } from "../utils/dreaming-events.js";
-import { ID_PATTERN } from "../utils/dreaming-wiki.js";
+import {
+  contextDirectory,
+  ID_PATTERN,
+  readContextFile,
+} from "../utils/dreaming-wiki.js";
 
 // 从固定发布版本及其引用中读取工作区和全局记忆。
 export class DreamingReaderService implements DreamingReader {
@@ -27,6 +31,19 @@ export class DreamingReaderService implements DreamingReader {
   // 固定 Run 启动时的 Wiki 与可见记忆版本。
   public captureSnapshot(workspaceId: string): RunMemorySnapshot {
     return this.dreaming.captureSnapshot(workspaceId);
+  }
+
+  // 读取固定版本的注入上下文；上下文与 Wiki 分开存储。
+  public async readContext(
+    workspaceId: string,
+    snapshot?: RunMemorySnapshot,
+  ): Promise<string | null> {
+    if (!ID_PATTERN.test(workspaceId)) throw new Error("Invalid Dreaming context reference");
+    const directoryId = snapshot
+      ? snapshot.contextDirectoryId
+      : this.dreaming.findContext(workspaceId)?.directoryId;
+    if (!directoryId) return null;
+    return readContextFile(contextDirectory(this.root, workspaceId, directoryId));
   }
 
   // 直接读取固定版本中完整的全局记忆及适用条件。
@@ -57,7 +74,11 @@ export class DreamingReaderService implements DreamingReader {
     signal?: AbortSignal,
     snapshot?: RunMemorySnapshot,
   ): Promise<string | null> {
-    if (!ID_PATTERN.test(workspaceId) || !DREAMING_WIKI_NAME_PATTERN.test(name))
+    if (
+      !ID_PATTERN.test(workspaceId) ||
+      !DREAMING_WIKI_NAME_PATTERN.test(name) ||
+      name === "context.md"
+    )
       throw new Error("Invalid Wiki reference");
     const directoryId = snapshot
       ? snapshot.wikiDirectoryId

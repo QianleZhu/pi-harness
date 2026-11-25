@@ -16,7 +16,6 @@ import {
 import { ApprovalPolicy, type ApprovalPolicyValue } from "@pi-harness/policy";
 import {
   type FileChangeDetails,
-  type HybridToolSearch,
   loadToolRegistrations,
   MAX_VISIBLE_TOOLS,
   type PlanUpdatedData,
@@ -235,7 +234,6 @@ export class RunCoordinator {
       throw new Error("SUBAGENT_MODEL_FAILED: 模型覆盖不可用");
     },
     private readonly subAgentToolNames: readonly string[] = [],
-    private readonly toolSearch?: HybridToolSearch,
   ) {
     this.toolHooks = new RunToolHooks({
       agent,
@@ -351,9 +349,7 @@ export class RunCoordinator {
     const available = this.toolRegistry.rawRegistrations.filter(
       ({ source, tool }) => source.startsWith("mcp:") && !run.visibleToolNames.has(tool.name),
     );
-    const matches = this.toolSearch
-      ? await this.toolSearch.search(available, query, signal)
-      : searchToolRegistrations(available, query);
+    const matches = searchToolRegistrations(available, query, limit);
     signal?.throwIfAborted();
     run.preparationAbortController.signal.throwIfAborted();
     if (this.activeRun !== run) throw new Error("TOOL_SEARCH_UNAVAILABLE: 搜索所属 Run 已结束");
@@ -897,7 +893,6 @@ export class RunCoordinator {
           ? new SubAgentTree({
               rootAgent: this.agent,
               rootRegistry: this.toolRegistry,
-              ...(this.toolSearch === undefined ? {} : { toolSearch: this.toolSearch }),
               ...(this.skillRegistry === undefined ? {} : { skillRegistry: this.skillRegistry }),
               runId: input.runId,
               model: input.model,

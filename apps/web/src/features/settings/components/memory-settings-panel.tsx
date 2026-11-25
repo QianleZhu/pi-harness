@@ -309,8 +309,7 @@ export function MemorySettingsPanel() {
                       </Switch>
                     </div>
                     <p className="text-xs text-muted">
-                      混合检索由本机 multilingual-e5-small
-                      与关键词索引共同完成，首次使用会自动下载模型。
+                      记忆检索由应用层分词与本机 SQLite FTS5 BM25 全文索引完成，无需下载外部模型。
                     </p>
                   </div>
                 </Popover.Dialog>

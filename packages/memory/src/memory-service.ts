@@ -52,34 +52,8 @@ export interface UserProfileRepository {
   update(item: StoredUserProfileInput): boolean;
 }
 
-export interface MemoryEmbedding {
-  dimensions: number;
-  modelId: string;
-  values: readonly number[];
-}
-
-export interface StoredMemoryEmbedding extends MemoryEmbedding {
-  memoryId: string;
-  memoryRevision: number;
-  updatedAt: number;
-}
-
-export interface VisibleMemoryEmbedding {
-  memory: MemoryRecord;
-  values: readonly number[];
-}
-
-export interface MemoryEmbedder {
-  readonly modelId: string;
-  embed(
-    purpose: "document" | "query",
-    inputs: readonly string[],
-    signal?: AbortSignal,
-  ): Promise<readonly (readonly number[])[]>;
-}
-
 export interface MemoryRepository {
-  create(memory: StoredMemoryInput, embedding: MemoryEmbedding | null): void;
+  create(memory: StoredMemoryInput): void;
   delete(memoryId: string, expectedRevision: number): boolean;
   find(memoryId: string): MemoryRecord | null;
   findDuplicate(
@@ -91,13 +65,6 @@ export interface MemoryRepository {
   getSettings(): MemorySettings;
   hasWorkspace(workspaceId: string): boolean;
   list(): readonly MemoryRecord[];
-  isEmbeddingIndexCurrent(modelId: string): boolean;
-  listVisibleEmbeddings(workspaceId: string, modelId: string): readonly VisibleMemoryEmbedding[];
-  replaceEmbeddingIndex(
-    modelId: string,
-    embeddings: readonly StoredMemoryEmbedding[],
-    updatedAt: number,
-  ): void;
   searchKeywordVisible(query: string, workspaceId: string, limit: number): readonly MemoryRecord[];
   searchKeywordSnapshot(
     query: string,
@@ -106,17 +73,7 @@ export interface MemoryRepository {
     limit: number,
     globalMemories?: readonly MemoryRecord[],
   ): readonly MemoryRecord[];
-  listSnapshotEmbeddings(
-    workspaceId: string,
-    versions: ReadonlyMap<string, number>,
-    modelId: string,
-    globalMemories?: readonly MemoryRecord[],
-  ): readonly VisibleMemoryEmbedding[];
-  update(
-    memory: StoredMemoryInput,
-    expectedRevision: number,
-    embedding?: MemoryEmbedding | null,
-  ): boolean;
+  update(memory: StoredMemoryInput, expectedRevision: number): boolean;
   updateSettings(settings: MemorySettings, updatedAt: number): void;
 }
 
@@ -211,14 +168,7 @@ export interface MemoryRuntime {
 }
 
 const DEFAULT_SETTINGS = { generateMemories: true, useMemories: true } as const;
-const HYBRID_CANDIDATE_MULTIPLIER = 4;
-const HYBRID_RRF_K = 60;
-// Keep lexical hits ahead of semantic-only candidates within the public 50-result limit.
-const KEYWORD_WEIGHT = 1.1;
-const MAX_SEMANTIC_SCORE_DROP = 0.03;
-const MIN_HYBRID_CANDIDATES = 40;
 const PROFILE_FACETS = Object.values(UserProfileFacet);
-const SEMANTIC_WEIGHT = 0.6;
 
 function normalizeContent(content: string): { content: string; normalized: string } {
   const trimmed = content.trim().replaceAll(/\s+/g, " ");
@@ -246,7 +196,6 @@ export class MemoryService implements MemoryRuntime {
 
   public constructor(
     private readonly repository: MemoryRepository,
-    private readonly embedder: MemoryEmbedder,
     private readonly dreaming?: DreamingReader,
     private readonly recorder?: MemoryRecorder,
     private readonly userProfiles?: UserProfileRepository,
@@ -486,11 +435,8 @@ export class MemoryService implements MemoryRuntime {
       updatedAt: Date.now(),
       workspaceId: null,
     };
-    const embedding =
-      updated.content === current.content
-        ? undefined
-        : await this.tryEmbedMemory(updated.content, signal);
-    if (!this.repository.update(updated, input.expectedRevision, embedding)) {
+    signal?.throwIfAborted();
+    if (!this.repository.update(updated, input.expectedRevision)) {
       throw new MemoryError(MemoryErrorCode.CONFLICT, "记忆已发生变化，请刷新后重试");
     }
     return updated;
@@ -553,7 +499,7 @@ export class MemoryService implements MemoryRuntime {
     return this.searchInternal(query, workspaceId, limit, signal, false);
   }
 
-  // 统一执行关键词与向量混合召回。
+  // 统一执行应用层预分词 + FTS5 BM25 关键词召回，并补充超出预算的本会话暂存记忆。
   private async searchInternal(
     query: string,
     workspaceId: string,
@@ -562,26 +508,23 @@ export class MemoryService implements MemoryRuntime {
     requireMemoryUse: boolean,
     snapshot?: RunMemorySnapshot | null,
   ): Promise<readonly MemoryRecord[]> {
+    signal?.throwIfAborted();
     const normalizedQuery = query.trim();
     if (!normalizedQuery) throw new MemoryError(MemoryErrorCode.INVALID, "检索内容不能为空");
     this.assertWorkspace(workspaceId);
     if (requireMemoryUse && !this.canUseMemories(snapshot)) return [];
     const resultLimit = Math.min(Math.max(limit, 1), 50);
-    const candidateLimit = Math.max(
-      MIN_HYBRID_CANDIDATES,
-      resultLimit * HYBRID_CANDIDATE_MULTIPLIER,
-    );
     const keyword = snapshot
       ? this.repository.searchKeywordSnapshot(
           normalizedQuery,
           workspaceId,
           snapshot.versions,
-          candidateLimit,
+          resultLimit,
           snapshot.globalMemories && snapshot.workspaceMemories
             ? [...snapshot.globalMemories, ...snapshot.workspaceMemories]
             : snapshot.globalMemories,
         )
-      : this.repository.searchKeywordVisible(normalizedQuery, workspaceId, candidateLimit);
+      : this.repository.searchKeywordVisible(normalizedQuery, workspaceId, resultLimit);
     const overflowProvisional =
       requireMemoryUse && snapshot?.provisionalMemories?.length
         ? formatProvisionalMemoriesContext(snapshot.provisionalMemories).overflow
@@ -591,46 +534,10 @@ export class MemoryService implements MemoryRuntime {
       overflowProvisional,
       resultLimit,
     );
-    const mergeOverflow = (base: readonly MemoryRecord[]): readonly MemoryRecord[] => {
-      if (!overflowHits.length) return base.slice(0, resultLimit);
-      const seen = new Set(base.map((item) => item.id));
-      const extra = overflowHits.filter((item) => !seen.has(item.id));
-      return [...base, ...extra].slice(0, resultLimit);
-    };
-    try {
-      await this.ensureEmbeddingIndex(signal);
-      const [queryVector] = await this.embedMany("query", [normalizedQuery], signal);
-      if (!queryVector) return mergeOverflow(keyword);
-      const semanticScores = (
-        snapshot
-          ? this.repository.listSnapshotEmbeddings(
-              workspaceId,
-              snapshot.versions,
-              this.embedder.modelId,
-              snapshot.globalMemories && snapshot.workspaceMemories
-                ? [...snapshot.globalMemories, ...snapshot.workspaceMemories]
-                : snapshot.globalMemories,
-            )
-          : this.repository.listVisibleEmbeddings(workspaceId, this.embedder.modelId)
-      )
-        // ponytail: exact scan is simpler for local memory volumes; add an ANN index when profiling shows this hot.
-        .map(({ memory, values }) => ({ memory, score: dotProduct(queryVector, values) }))
-        .sort((left, right) => right.score - left.score);
-      const bestSemanticScore = semanticScores[0]?.score;
-      const semantic = semanticScores
-        // E5 absolute scores cluster tightly; keep candidates close to the best rank instead of using an ineffective absolute threshold.
-        .filter(
-          ({ score }) =>
-            bestSemanticScore !== undefined && bestSemanticScore - score <= MAX_SEMANTIC_SCORE_DROP,
-        )
-        .slice(0, candidateLimit)
-        .map(({ memory }) => memory);
-
-      return mergeOverflow(fuseRanks(keyword, semantic));
-    } catch (error: unknown) {
-      if (signal?.aborted) throw error;
-      return mergeOverflow(keyword);
-    }
+    if (!overflowHits.length) return keyword.slice(0, resultLimit);
+    const seen = new Set(keyword.map((item) => item.id));
+    const extra = overflowHits.filter((item) => !seen.has(item.id));
+    return [...keyword, ...extra].slice(0, resultLimit);
   }
 
   // 使用 Run 固定的开关、用户个性、上下文版本及本 Session 暂存记录在内存中拼装，不写入磁盘 context.md。
@@ -697,72 +604,9 @@ export class MemoryService implements MemoryRuntime {
       updatedAt: createdAt,
       workspaceId,
     };
-    const embedding = await this.tryEmbedMemory(memory.content, signal);
-    this.repository.create(memory, embedding);
+    signal?.throwIfAborted();
+    this.repository.create(memory);
     return memory;
-  }
-
-  private async tryEmbedMemory(
-    content: string,
-    signal?: AbortSignal,
-  ): Promise<MemoryEmbedding | null> {
-    try {
-      const [values] = await this.embedMany("document", [content], signal);
-      return values ? { dimensions: values.length, modelId: this.embedder.modelId, values } : null;
-    } catch (error: unknown) {
-      if (signal?.aborted) throw error;
-      return null;
-    }
-  }
-
-  private async embedMany(
-    purpose: "document" | "query",
-    inputs: readonly string[],
-    signal?: AbortSignal,
-  ): Promise<readonly (readonly number[])[]> {
-    if (!inputs.length) return [];
-    try {
-      const vectors = await this.embedder.embed(purpose, inputs, signal);
-      if (vectors.length !== inputs.length) throw new Error("Embedding count mismatch");
-      const dimensions = vectors[0]?.length ?? 0;
-      if (!dimensions || vectors.some((vector) => vector.length !== dimensions)) {
-        throw new Error("Embedding dimensions mismatch");
-      }
-      return vectors.map(normalizeVector);
-    } catch (error: unknown) {
-      if (error instanceof MemoryError) throw error;
-      if (signal?.aborted) throw error;
-      throw new MemoryError(
-        MemoryErrorCode.EMBEDDING_FAILED,
-        error instanceof Error ? error.message : "向量生成失败",
-      );
-    }
-  }
-
-  private async ensureEmbeddingIndex(signal?: AbortSignal): Promise<void> {
-    if (this.repository.isEmbeddingIndexCurrent(this.embedder.modelId)) return;
-    await this.withMutation(async () => {
-      if (this.repository.isEmbeddingIndexCurrent(this.embedder.modelId)) return;
-      const memories = this.repository.list();
-      const vectors = await this.embedMany(
-        "document",
-        memories.map(({ content }) => content),
-        signal,
-      );
-      const updatedAt = Date.now();
-      this.repository.replaceEmbeddingIndex(
-        this.embedder.modelId,
-        memories.map((memory, index) => ({
-          dimensions: vectors[index]?.length ?? 0,
-          memoryId: memory.id,
-          memoryRevision: memory.revision,
-          modelId: this.embedder.modelId,
-          updatedAt,
-          values: vectors[index] ?? [],
-        })),
-        updatedAt,
-      );
-    });
   }
 
   private async withMutation<T>(operation: () => Promise<T> | T): Promise<T> {
@@ -783,38 +627,4 @@ export class MemoryService implements MemoryRuntime {
 
 export function getDefaultMemorySettings(): MemorySettings {
   return { ...DEFAULT_SETTINGS };
-}
-
-function normalizeVector(vector: readonly number[]): readonly number[] {
-  if (!vector.length || vector.some((value) => !Number.isFinite(value))) {
-    throw new Error("Invalid embedding vector");
-  }
-  const magnitude = Math.hypot(...vector);
-  if (!magnitude) throw new Error("Invalid zero embedding vector");
-  return vector.map((value) => value / magnitude);
-}
-
-function dotProduct(left: readonly number[], right: readonly number[]): number {
-  if (left.length !== right.length) return Number.NEGATIVE_INFINITY;
-  return left.reduce((score, value, index) => score + value * (right[index] ?? 0), 0);
-}
-
-function fuseRanks(
-  keyword: readonly MemoryRecord[],
-  semantic: readonly MemoryRecord[],
-): readonly MemoryRecord[] {
-  const records = new Map<string, MemoryRecord>();
-  const scores = new Map<string, number>();
-  const add = (items: readonly MemoryRecord[], weight: number) => {
-    items.forEach((memory, index) => {
-      records.set(memory.id, memory);
-      scores.set(memory.id, (scores.get(memory.id) ?? 0) + weight / (HYBRID_RRF_K + index + 1));
-    });
-  };
-  add(keyword, KEYWORD_WEIGHT);
-  add(semantic, SEMANTIC_WEIGHT);
-  return [...records.values()].sort(
-    (left, right) =>
-      (scores.get(right.id) ?? 0) - (scores.get(left.id) ?? 0) || right.updatedAt - left.updatedAt,
-  );
 }

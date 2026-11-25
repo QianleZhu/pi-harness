@@ -14,13 +14,11 @@ import {
   createSubAgentToolRegistrations,
   createToolSearchTool,
   createWorkspaceToolRegistry,
-  HybridToolSearch,
   type PlanUpdatedData,
   type SkillDefinition,
   SkillRegistry,
   type TodoUpdatedData,
   type ToolRegistration,
-  type ToolSearchEmbedder,
   type WorkspaceToolContext,
 } from "@pi-harness/tools";
 import { loadWorkspaceAgentContext } from "./context/workspace-agent-context.js";
@@ -89,7 +87,6 @@ export class AgentManager {
   private readonly runtimes = new Map<SessionId, RunCoordinator>();
   private readonly memorySnapshots = new Map<SessionId, RunMemorySnapshot>();
   private readonly commandProcesses = new Map<SessionId, CommandProcessManager>();
-  private readonly toolSearch: HybridToolSearch;
   private activeSubAgents = 0;
 
   public constructor(
@@ -115,10 +112,7 @@ export class AgentManager {
       error: unknown,
       context: { processId: string; sessionId: string },
     ) => void = () => undefined,
-    toolSearchEmbedder?: ToolSearchEmbedder,
-  ) {
-    this.toolSearch = new HybridToolSearch(toolSearchEmbedder);
-  }
+  ) {}
 
   private acquireSubAgentSlot = (): (() => void) | null => {
     if (this.activeSubAgents >= 8) return null;
@@ -421,7 +415,6 @@ export class AgentManager {
         return this.resolveSubAgentModel(providerId, modelId);
       },
       subAgentTools.map(({ tool }) => tool.name),
-      this.toolSearch,
     );
     this.commandProcesses.set(input.sessionId, commandProcesses);
     this.runtimes.set(input.sessionId, runtime);

@@ -19,7 +19,6 @@ import {
   createRequestUserInputTool,
   createSubAgentToolRegistrations,
   createToolSearchTool,
-  type HybridToolSearch,
   loadToolRegistrations,
   MAX_VISIBLE_TOOLS,
   type RequestUserInputData,
@@ -127,7 +126,6 @@ interface Execution {
 export interface SubAgentTreeOptions {
   rootAgent: Agent;
   rootRegistry: ToolRegistry;
-  toolSearch?: HybridToolSearch;
   skillRegistry?: SkillRegistry;
   runId: RunId;
   model: Model<Api>;
@@ -402,9 +400,7 @@ export class SubAgentTree {
                     ({ source, tool }) =>
                       source.startsWith("mcp:") && !visibleToolNames.has(tool.name),
                   );
-                  const matches = this.options.toolSearch
-                    ? await this.options.toolSearch.search(available, query, searchSignal)
-                    : searchToolRegistrations(available, query);
+                  const matches = searchToolRegistrations(available, query, limit);
                   searchSignal?.throwIfAborted();
                   if (
                     execution.status !== SubAgentStatus.RUNNING ||

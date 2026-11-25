@@ -11,7 +11,6 @@ export type MemoryScope = (typeof MemoryScope)[keyof typeof MemoryScope];
 export const MemoryErrorCode = {
   CONFLICT: "MEMORY_CONFLICT",
   DUPLICATE: "MEMORY_DUPLICATE",
-  EMBEDDING_FAILED: "MEMORY_EMBEDDING_FAILED",
   INVALID: "MEMORY_INVALID",
   LEARNING_DISABLED: "MEMORY_LEARNING_DISABLED",
   NOT_FOUND: "MEMORY_NOT_FOUND",

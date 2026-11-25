@@ -1,7 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import {
   getDefaultMemorySettings,
-  type MemoryEmbedding,
   MemoryError,
   MemoryErrorCode,
   type MemoryRecord,
@@ -10,10 +9,13 @@ import {
   type MemoryScope as MemoryScopeValue,
   type MemorySettings,
   MemorySourceType,
-  type StoredMemoryEmbedding,
   type StoredMemoryInput,
-  type VisibleMemoryEmbedding,
 } from "@pi-harness/memory";
+import {
+  buildFtsMatchQuery,
+  FTS5_UNICODE61_TOKENIZER,
+  formatFtsIndexText,
+} from "@pi-harness/tools";
 import { recordGlobalMemoryVersion } from "./global-memory-version.js";
 
 interface MemoryRow {
@@ -67,28 +69,13 @@ function mapMemory(row: MemoryRow): MemoryRecord {
   };
 }
 
-function mapVector(value: unknown, dimensions: number): readonly number[] {
-  if (
-    !(value instanceof Uint8Array) ||
-    value.byteLength !== dimensions * Float32Array.BYTES_PER_ELEMENT
-  ) {
-    throw new Error("Invalid memory embedding");
-  }
-  const bytes = Uint8Array.from(value);
-  return [...new Float32Array(bytes.buffer)];
-}
-
-function vectorBlob(values: readonly number[]): Uint8Array {
-  return new Uint8Array(Float32Array.from(values).buffer);
-}
-
 export class SqliteMemoryRepository implements MemoryRepository {
   public constructor(private readonly database: DatabaseSync) {}
 
-  public create(memory: StoredMemoryInput, embedding: MemoryEmbedding | null): void {
+  public create(memory: StoredMemoryInput): void {
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      // 跨进程异步生成 embedding 期间 Worker 可能写入了相同内容，在事务内复查并稳定映射为 DUPLICATE。
+      // 跨进程并发写入时在事务内复查唯一内容约束并稳定映射为 DUPLICATE。
       if (this.findDuplicate(memory.normalizedContent, memory.scope, memory.workspaceId)) {
         throw new MemoryError(MemoryErrorCode.DUPLICATE, "已有相同作用范围的记忆");
       }
@@ -113,20 +100,13 @@ export class SqliteMemoryRepository implements MemoryRepository {
         );
       this.database
         .prepare("INSERT INTO memory_search (memory_id, content) VALUES (?, ?)")
-        .run(memory.id, memory.content);
-      if (embedding) this.insertEmbedding(memory.id, memory.revision, embedding, memory.updatedAt);
+        .run(memory.id, formatFtsIndexText(memory.content));
       // 手动创建的版本也必须能被后续 Run 固定和追溯。
       this.database
         .prepare(`INSERT INTO memory_revisions
           (memory_id, revision, content, applicability, evidence_status, created_at)
           VALUES (?, ?, ?, NULL, 'user_stated', ?)`)
         .run(memory.id, memory.revision, memory.content, memory.updatedAt);
-      this.database
-        .prepare(`INSERT INTO memory_revision_embeddings
-          (memory_id, revision, model_id, dimensions, embedding)
-          SELECT memory_id, memory_revision, model_id, dimensions, embedding FROM memory_embeddings
-          WHERE memory_id = ? AND memory_revision = ?`)
-        .run(memory.id, memory.revision);
       if (memory.scope === MemoryScope.GLOBAL)
         recordGlobalMemoryVersion(this.database, memory.updatedAt);
       this.database.exec("COMMIT");
@@ -206,27 +186,6 @@ export class SqliteMemoryRepository implements MemoryRepository {
     return settings;
   }
 
-  public isEmbeddingIndexCurrent(modelId: string): boolean {
-    const index = this.database
-      .prepare("SELECT model_id FROM memory_embedding_settings WHERE singleton = 1")
-      .get();
-    if (index === undefined || requiredString(index, "model_id") !== modelId) {
-      return false;
-    }
-    return (
-      this.database
-        .prepare(
-          `SELECT 1 FROM memories
-           LEFT JOIN memory_embeddings ON memory_embeddings.memory_id = memories.id
-             AND memory_embeddings.model_id = ?
-             AND memory_embeddings.memory_revision = memories.revision
-           WHERE memories.status = 'saved' AND memory_embeddings.memory_id IS NULL
-           LIMIT 1`,
-        )
-        .get(modelId) === undefined
-    );
-  }
-
   public hasWorkspace(workspaceId: string): boolean {
     return (
       this.database
@@ -240,28 +199,6 @@ export class SqliteMemoryRepository implements MemoryRepository {
       .prepare("SELECT * FROM memories WHERE status = 'saved' ORDER BY updated_at DESC, id")
       .all()
       .map(mapMemory);
-  }
-
-  public listVisibleEmbeddings(
-    workspaceId: string,
-    modelId: string,
-  ): readonly VisibleMemoryEmbedding[] {
-    return this.database
-      .prepare(
-        `SELECT memories.*, memory_embeddings.dimensions, memory_embeddings.embedding
-         FROM memories
-         JOIN memory_embeddings ON memory_embeddings.memory_id = memories.id
-         WHERE memories.status = 'saved'
-           AND (memories.scope = 'global' OR memories.workspace_id = ?)
-           AND memory_embeddings.model_id = ?
-           AND memory_embeddings.memory_revision = memories.revision
-         ORDER BY memories.updated_at DESC, memories.id`,
-      )
-      .all(workspaceId, modelId)
-      .map((row) => ({
-        memory: mapMemory(row),
-        values: mapVector(row.embedding, requiredInteger(row, "dimensions")),
-      }));
   }
 
   // 按 Run 固定的版本读取记忆，历史内容来自不可变版本表。
@@ -293,7 +230,7 @@ export class SqliteMemoryRepository implements MemoryRepository {
     return result;
   }
 
-  // 在固定版本范围内查找关键词，保留现有 trigram 匹配方式。
+  // 在固定版本范围内使用应用层预分词 + 内存 FTS5 unicode61 计算 BM25，后台新增版本不影响本次 Run 排序。
   public searchKeywordSnapshot(
     query: string,
     workspaceId: string,
@@ -301,29 +238,25 @@ export class SqliteMemoryRepository implements MemoryRepository {
     limit: number,
     globalMemories?: readonly MemoryRecord[],
   ): readonly MemoryRecord[] {
+    const expression = buildFtsMatchQuery(query);
+    if (expression === null) return [];
     const memories = this.listSnapshotMemories(workspaceId, versions, globalMemories);
-    if (query.length < 3)
-      return memories
-        .filter((memory) => memory.content.toLocaleLowerCase().includes(query.toLocaleLowerCase()))
-        .slice(0, limit);
-    const terms = query
-      .split(/[^\p{L}\p{N}_-]+/u)
-      .map((term) => term.trim())
-      .filter((term) => term.length >= 3)
-      .slice(0, 8);
-    const expression = (terms.length ? terms : [query])
-      .map((term) => `"${term.replaceAll('"', '""')}"`)
-      .join(" OR ");
-    // 每次按固定版本构建 FTS，后台新增版本不会改变本次 Run 的排序。
+    if (memories.length === 0) return [];
     const index = new DatabaseSync(":memory:");
     try {
       index.exec(
-        "CREATE VIRTUAL TABLE snapshot_search USING fts5(memory_id UNINDEXED, content, tokenize='trigram')",
+        `CREATE VIRTUAL TABLE snapshot_search USING fts5(
+          memory_id UNINDEXED,
+          content,
+          tokenize='${FTS5_UNICODE61_TOKENIZER}'
+        )`,
       );
       const insert = index.prepare(
         "INSERT INTO snapshot_search (memory_id, content) VALUES (?, ?)",
       );
-      for (const memory of memories) insert.run(memory.id, memory.content);
+      for (const memory of memories) {
+        insert.run(memory.id, formatFtsIndexText(memory.content));
+      }
       const rows = index
         .prepare(
           "SELECT memory_id FROM snapshot_search WHERE snapshot_search MATCH ? ORDER BY bm25(snapshot_search), rowid LIMIT ?",
@@ -339,84 +272,13 @@ export class SqliteMemoryRepository implements MemoryRepository {
     }
   }
 
-  // 从版本化向量索引读取固定版本，当前版本可复用现有索引。
-  public listSnapshotEmbeddings(
-    workspaceId: string,
-    versions: ReadonlyMap<string, number>,
-    modelId: string,
-    globalMemories?: readonly MemoryRecord[],
-  ): readonly VisibleMemoryEmbedding[] {
-    return this.listSnapshotMemories(workspaceId, versions, globalMemories).flatMap((memory) => {
-      const row = this.database
-        .prepare(`SELECT dimensions, embedding FROM memory_revision_embeddings
-        WHERE memory_id = ? AND revision = ? AND model_id = ?
-        UNION ALL SELECT dimensions, embedding FROM memory_embeddings
-        WHERE memory_id = ? AND memory_revision = ? AND model_id = ? LIMIT 1`)
-        .get(memory.id, memory.revision, modelId, memory.id, memory.revision, modelId);
-      return row
-        ? [{ memory, values: mapVector(row.embedding, requiredInteger(row, "dimensions")) }]
-        : [];
-    });
-  }
-
-  public replaceEmbeddingIndex(
-    modelId: string,
-    embeddings: readonly StoredMemoryEmbedding[],
-    updatedAt: number,
-  ): void {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      this.database.exec("DELETE FROM memory_embeddings; DELETE FROM memory_embedding_settings;");
-      this.database
-        .prepare(
-          `INSERT INTO memory_embedding_settings
-             (singleton, model_id, updated_at) VALUES (1, ?, ?)`,
-        )
-        .run(modelId, updatedAt);
-      for (const embedding of embeddings) {
-        this.insertEmbedding(
-          embedding.memoryId,
-          embedding.memoryRevision,
-          embedding,
-          embedding.updatedAt,
-        );
-      }
-      this.database.exec("COMMIT");
-    } catch (error: unknown) {
-      this.database.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
   public searchKeywordVisible(
     query: string,
     workspaceId: string,
     limit: number,
   ): readonly MemoryRecord[] {
-    if (query.length < 3) {
-      return this.database
-        .prepare(
-          `SELECT * FROM memories
-           WHERE status = 'saved' AND (scope = 'global' OR workspace_id = ?)
-             AND normalized_content LIKE ? ESCAPE '\\'
-           ORDER BY updated_at DESC, id
-           LIMIT ?`,
-        )
-        .all(
-          workspaceId,
-          `%${query.toLocaleLowerCase().replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_")}%`,
-          limit,
-        )
-        .map(mapMemory);
-    }
-    const terms = query
-      .split(/[^\p{L}\p{N}_-]+/u)
-      .map((term) => term.trim())
-      .filter((term) => term.length >= 3)
-      .slice(0, 8);
-    const expression = (terms.length ? terms : [query])
-      .map((term) => `"${term.replaceAll('"', '""')}"`)
-      .join(" OR ");
+    const expression = buildFtsMatchQuery(query);
+    if (expression === null) return [];
     return this.database
       .prepare(
         `SELECT memories.* FROM memory_search
@@ -431,11 +293,7 @@ export class SqliteMemoryRepository implements MemoryRepository {
       .map(mapMemory);
   }
 
-  public update(
-    memory: StoredMemoryInput,
-    expectedRevision: number,
-    embedding?: MemoryEmbedding | null,
-  ): boolean {
+  public update(memory: StoredMemoryInput, expectedRevision: number): boolean {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const previous = this.database
@@ -445,24 +303,18 @@ export class SqliteMemoryRepository implements MemoryRepository {
         this.database.exec("COMMIT");
         return false;
       }
-      // 跨进程并发下在事务内复查唯一内容约束，避免异步 embedding 窗口期抛出裸 SQLite 唯一索引错误。
+      // 跨进程并发下在事务内复查唯一内容约束，避免抛出裸 SQLite 唯一索引错误。
       if (
         this.findDuplicate(memory.normalizedContent, memory.scope, memory.workspaceId, memory.id)
       ) {
         throw new MemoryError(MemoryErrorCode.DUPLICATE, "已有相同的全局记忆");
       }
-      // 先保存旧内容及向量，确保已启动的 Run 继续读取固定版本。
+      // 先保存旧内容版本，确保已启动的 Run 继续读取固定版本。
       this.database
         .prepare(`INSERT OR IGNORE INTO memory_revisions
           (memory_id, revision, content, applicability, evidence_status, created_at)
           SELECT id, revision, content, NULL, 'user_stated', updated_at FROM memories
           WHERE id = ? AND revision = ?`)
-        .run(memory.id, expectedRevision);
-      this.database
-        .prepare(`INSERT OR IGNORE INTO memory_revision_embeddings
-          (memory_id, revision, model_id, dimensions, embedding)
-          SELECT memory_id, memory_revision, model_id, dimensions, embedding FROM memory_embeddings
-          WHERE memory_id = ? AND memory_revision = ?`)
         .run(memory.id, expectedRevision);
       const updated =
         this.database
@@ -486,21 +338,7 @@ export class SqliteMemoryRepository implements MemoryRepository {
         this.database.prepare("DELETE FROM memory_search WHERE memory_id = ?").run(memory.id);
         this.database
           .prepare("INSERT INTO memory_search (memory_id, content) VALUES (?, ?)")
-          .run(memory.id, memory.content);
-        if (embedding) {
-          this.database.prepare("DELETE FROM memory_embeddings WHERE memory_id = ?").run(memory.id);
-          this.insertEmbedding(memory.id, memory.revision, embedding, memory.updatedAt);
-        } else if (embedding === null) {
-          this.database.prepare("DELETE FROM memory_embeddings WHERE memory_id = ?").run(memory.id);
-        } else {
-          this.database
-            .prepare(
-              `UPDATE memory_embeddings SET memory_revision = ?, updated_at = ?
-               WHERE memory_id = ? AND memory_revision = ?`,
-            )
-            .run(memory.revision, memory.updatedAt, memory.id, expectedRevision);
-        }
-        // 新版本及其向量与当前记录一起提交。
+          .run(memory.id, formatFtsIndexText(memory.content));
         if (previous?.content === memory.content) {
           // 仅调整分类或作用域时保留原有适用条件与证据来源。
           this.database
@@ -522,12 +360,6 @@ export class SqliteMemoryRepository implements MemoryRepository {
               VALUES (?, ?, ?, NULL, 'user_stated', ?)`)
             .run(memory.id, memory.revision, memory.content, memory.updatedAt);
         }
-        this.database
-          .prepare(`INSERT INTO memory_revision_embeddings
-            (memory_id, revision, model_id, dimensions, embedding)
-            SELECT memory_id, memory_revision, model_id, dimensions, embedding FROM memory_embeddings
-            WHERE memory_id = ? AND memory_revision = ?`)
-          .run(memory.id, memory.revision);
         if (previous?.scope === MemoryScope.GLOBAL || memory.scope === MemoryScope.GLOBAL)
           recordGlobalMemoryVersion(this.database, memory.updatedAt);
       }
@@ -558,27 +390,5 @@ export class SqliteMemoryRepository implements MemoryRepository {
     );
     upsert.run("use_memories", Number(settings.useMemories), updatedAt);
     upsert.run("generate_memories", Number(settings.generateMemories), updatedAt);
-  }
-
-  private insertEmbedding(
-    memoryId: string,
-    memoryRevision: number,
-    embedding: MemoryEmbedding,
-    updatedAt: number,
-  ): void {
-    this.database
-      .prepare(
-        `INSERT INTO memory_embeddings (
-           memory_id, model_id, dimensions, embedding, memory_revision, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        memoryId,
-        embedding.modelId,
-        embedding.dimensions,
-        vectorBlob(embedding.values),
-        memoryRevision,
-        updatedAt,
-      );
   }
 }

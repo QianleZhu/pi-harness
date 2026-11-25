@@ -3,19 +3,15 @@ export * from "./dreaming.js";
 export {
   type DreamingReader,
   getDefaultMemorySettings,
-  type MemoryEmbedder,
-  type MemoryEmbedding,
   MemoryError,
   type MemoryRecorder,
   type MemoryRepository,
   type MemoryRuntime,
   MemoryService,
   type RunMemorySnapshot,
-  type StoredMemoryEmbedding,
   type StoredMemoryInput,
   type StoredUserProfileInput,
   type UserProfileRepository,
-  type VisibleMemoryEmbedding,
 } from "./memory-service.js";
 export {
   createMemoryToolRegistrations,

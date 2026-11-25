@@ -6,8 +6,6 @@ import {
   GLOBAL_DREAMING_PROMPT,
   type GlobalDreamingCandidate,
   type GlobalDreamingMemoryChange,
-  type MemoryEmbedder,
-  type MemoryEmbedding,
 } from "@pi-harness/memory";
 import type { SessionRepository } from "../storage/database.js";
 import type { SqliteDreamingRepository } from "../storage/dreaming-repository.js";
@@ -22,7 +20,6 @@ export class GlobalDreamingService {
     private readonly dreaming: SqliteDreamingRepository,
     private readonly sessions: SessionRepository,
     private readonly providers: ProviderService,
-    private readonly embedder?: MemoryEmbedder,
   ) {}
 
   // 工作区发布成功后，将候选放入 Worker 内存队列。
@@ -116,7 +113,6 @@ export class GlobalDreamingService {
         const latest = this.dreaming.getGlobalVersion();
         if (latest.version === base.version) {
           if (!changes.length) return;
-          await this.prepareEmbeddings(changes, signal);
           signal.throwIfAborted();
           if (
             this.dreaming.publishGlobal({
@@ -170,35 +166,6 @@ export class GlobalDreamingService {
       }
     } finally {
       signal.removeEventListener("abort", abort);
-    }
-  }
-
-  // 提交前提前计算归一化向量；本地模型不可用时退化为关键词召回。
-  private async prepareEmbeddings(
-    changes: readonly GlobalDreamingMemoryChange[],
-    signal: AbortSignal,
-  ): Promise<void> {
-    if (!this.embedder) return;
-    for (const change of changes) {
-      change.embedding = await this.tryEmbed(change.content.trim().replaceAll(/\s+/g, " "), signal);
-    }
-  }
-
-  private async tryEmbed(content: string, signal: AbortSignal): Promise<MemoryEmbedding | null> {
-    if (!this.embedder) return null;
-    try {
-      const [vector] = await this.embedder.embed("document", [content], signal);
-      if (!vector?.length || vector.some((value) => !Number.isFinite(value))) return null;
-      const magnitude = Math.hypot(...vector);
-      if (!magnitude) return null;
-      return {
-        modelId: this.embedder.modelId,
-        dimensions: vector.length,
-        values: vector.map((value) => value / magnitude),
-      };
-    } catch (error: unknown) {
-      if (signal.aborted) throw error;
-      return null;
     }
   }
 }

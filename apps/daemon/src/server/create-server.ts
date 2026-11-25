@@ -29,7 +29,6 @@ import { DreamingReaderService } from "../services/dreaming-reader.js";
 import { DreamingWorkerHost } from "../services/dreaming-worker-host.js";
 import { FileOpenService } from "../services/file-open-service.js";
 import { HumanInteractionService } from "../services/human-interaction-service.js";
-import { LocalMemoryEmbedder } from "../services/local-memory-embedder.js";
 import { McpDiagnosticsService } from "../services/mcp-diagnostics-service.js";
 import { McpOAuthService } from "../services/mcp-oauth-service.js";
 import { McpServerService } from "../services/mcp-server-service.js";
@@ -199,21 +198,9 @@ export async function createServer(config: HarnessConfig = loadHarnessConfig()) 
     () => dreamingWorker?.isActive() ?? false,
   );
   providers.setAvailabilityObserver(() => dreamingWorker?.providersChanged());
-  const localMemoryEmbedder = new LocalMemoryEmbedder(config.globalRoot);
   const memoryRecorder = new MemoryRecorderService(database.dreaming, database.memories);
   const memories = new MemoryService(
     database.memories,
-    {
-      modelId: localMemoryEmbedder.modelId,
-      embed: async (purpose, inputs, signal) => {
-        try {
-          return await localMemoryEmbedder.embed(purpose, inputs, signal);
-        } catch (error: unknown) {
-          server.log.warn({ err: error }, "Local memory embedding unavailable");
-          throw error;
-        }
-      },
-    },
     new DreamingReaderService(
       config.globalRoot,
       database.dreaming,
@@ -243,7 +230,6 @@ export async function createServer(config: HarnessConfig = loadHarnessConfig()) 
     async (providerId, modelId) => (await providers.resolveRunModel(providerId, modelId)).model,
     (error, context) =>
       server.log.error({ err: error, ...context }, "Command process lifecycle failed"),
-    localMemoryEmbedder,
   );
   const workspaces = new WorkspaceService(
     database.workspaces,

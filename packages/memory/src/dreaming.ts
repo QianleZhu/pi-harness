@@ -1,5 +1,3 @@
-import type { MemoryEmbedding } from "./memory-service.js";
-
 // Dreaming 保存的记忆版本及其证据状态。
 export const MemoryEvidenceStatus = {
   USER_STATED: "user_stated",
@@ -43,7 +41,6 @@ export interface DreamingMemoryChange {
   applicability: string | null;
   evidenceStatus: MemoryEvidenceStatus;
   sources: Omit<MemoryRevisionSource, "memoryId" | "revision">[];
-  embedding?: MemoryEmbedding | null;
 }
 
 // 全局整理草案仅维护跨项目经验，不涉及用户个性。

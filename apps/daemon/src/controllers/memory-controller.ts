@@ -131,12 +131,10 @@ export class MemoryController {
       const status =
         error.code === MemoryErrorCode.INVALID
           ? 400
-          : error.code === MemoryErrorCode.EMBEDDING_FAILED
-            ? 502
-            : error.code === MemoryErrorCode.NOT_FOUND ||
-                error.code === MemoryErrorCode.WORKSPACE_NOT_FOUND
-              ? 404
-              : 409;
+          : error.code === MemoryErrorCode.NOT_FOUND ||
+              error.code === MemoryErrorCode.WORKSPACE_NOT_FOUND
+            ? 404
+            : 409;
       return reply.status(status).send({ code: error.code, message: error.message });
     }
     request.log.error({ err: error }, "Memory operation failed");

@@ -62,7 +62,9 @@ function renderProvisionalSection(
   return lines.join("\n");
 }
 
-// 方案 A：仅对超出内存上下文预算的本会话暂存记忆做轻量关键词匹配，不构建向量索引。
+const zhWordSegmenter = new Intl.Segmenter("zh-CN", { granularity: "word" });
+
+// 仅对超出内存上下文预算的本会话暂存记忆做轻量分词匹配。
 export function searchOverflowProvisionalMemories(
   query: string,
   items: readonly ProvisionalMemory[],
@@ -71,10 +73,14 @@ export function searchOverflowProvisionalMemories(
   if (!items.length || limit <= 0) return [];
   const normalizedQuery = query.trim().toLocaleLowerCase();
   if (!normalizedQuery) return [];
-  const terms = normalizedQuery
-    .split(/[^\p{L}\p{N}_-]+/u)
-    .map((term) => term.trim())
-    .filter((term) => term.length >= 2);
+  const terms = [
+    ...new Set(
+      Array.from(zhWordSegmenter.segment(normalizedQuery))
+        .filter((segment) => segment.isWordLike)
+        .map((segment) => segment.segment.trim())
+        .filter((term) => term.length >= 1),
+    ),
+  ];
 
   const scored: { item: ProvisionalMemory; score: number }[] = [];
   for (const item of items) {

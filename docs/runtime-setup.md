@@ -17,13 +17,13 @@
 | Session 搜索 | SQLite FTS5 从 JSONL 有效分支派生消息索引；Agent 另有当前 Session 历史搜索工具 | [SessionService](../apps/daemon/src/services/session-service.ts)、[Context Runtime Tools](../packages/tools/src/tools/context-runtime.ts) |
 | Trace | Web 从 HarnessEvent 派生主/子 Agent 轨迹；完整消息、模型请求、工具、审批和压缩详情按需加载 | [Agent Trace 投影](../apps/web/src/features/trace/utils/session-events-to-agent-traces.ts) |
 | MCP Host | daemon 管理服务器、凭据、信任、能力目录和 Client；调用接入现有执行链 | [MCP 模块](../apps/daemon/src/mcp)、[McpToolService](../apps/daemon/src/services/mcp-tool-service.ts) |
-| MCP 工具发现 | tool_search 做精确名称优先、BM25/本地向量混合检索并自动加载匹配定义；默认 8 个、最多 10 个；搜索不授予执行权限 | [工具搜索](../packages/tools/src/tools/tool-search.ts)、[HybridToolSearch](../packages/tools/src/utils/tool-search.ts) |
-| Long-term Memory | user/workspace scope、Dreaming 跨项目候选与全局整理、版本快照、编辑/删除、派生用户画像及 FTS/本地向量混合召回 | [MemoryService](../packages/memory/src/memory-service.ts)、[SQLite adapter](../apps/daemon/src/storage/memory-repository.ts) |
+| MCP 工具发现 | tool_search 做精确名称优先、应用层预分词与内存 FTS5 `unicode61` 多列加权 BM25 检索并自动加载匹配定义；默认 8 个、最多 10 个；搜索不授予执行权限 | [工具搜索](../packages/tools/src/tools/tool-search.ts)、[searchToolRegistrations](../packages/tools/src/utils/tool-search.ts)、[fts-search](../packages/tools/src/utils/fts-search.ts) |
+| Long-term Memory | global/workspace scope、Dreaming 跨项目候选与全局整理、版本快照、编辑/删除、独立用户个性及应用层预分词 + FTS5 `unicode61` BM25 召回 | [MemoryService](../packages/memory/src/memory-service.ts)、[SQLite adapter](../apps/daemon/src/storage/memory-repository.ts) |
 | Computer Use | macOS 原生 helper、受限脚本、窗口截图、Accessibility Tree 和输入，通过内置 MCP App/权限链接入 | [Computer Use](../packages/computer-use/README.md)、[系统权限服务](../apps/daemon/src/services/computer-use-permission-service.ts) |
 | 任务看板与 Sub Agent | 顶层任务关联 Run；成功完成进入待确认，由用户确认完成，失败/中止进入等待；父子执行树、委派/等待/消息/停止、独立轨迹与重启中断恢复 | [BoardTaskService](../apps/daemon/src/services/board-task-service.ts)、[SubAgentTree](../packages/agent-runtime/src/sub-agent-tree.ts) |
 | 桌面端 | Tauri 管理动态端口与 Node sidecar；daemon 托管 Web；GitHub 登录使用 Device Flow | [Tauri 入口](../apps/desktop/src-tauri/src/main.rs)、[AuthService](../apps/daemon/src/services/auth-service.ts) |
 
-Memory 混合检索、MCP 工具混合检索和 Session 搜索分别服务具体场景。通用文档 RAG、独立 Retrieval package、多 sink 追踪仍是演进方向；当前没有 `apps/daemon/src/observability`，也没有统一 `spanId/parentSpanId` 链路实现。
+Memory 关键词检索、MCP 工具关键词检索和 Session 搜索分别服务具体场景，其中 Memory 与 MCP 工具共用同一套应用层预分词与 SQLite FTS5 `unicode61` BM25 实现。通用文档 RAG、独立 Retrieval package、多 sink 追踪仍是演进方向；当前没有 `apps/daemon/src/observability`，也没有统一 `spanId/parentSpanId` 链路实现。
 
 ## 环境与命令入口
 

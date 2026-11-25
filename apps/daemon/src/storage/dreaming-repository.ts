@@ -14,6 +14,7 @@ import {
   type UserProfileItem,
   UserProfileItemSchema,
 } from "@pi-harness/memory";
+import { formatFtsIndexText } from "@pi-harness/tools";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { recordGlobalMemoryVersion } from "./global-memory-version.js";
@@ -311,12 +312,6 @@ export class SqliteDreamingRepository {
               String(current.content),
               Number(current.updated_at),
             );
-          this.database
-            .prepare(`INSERT OR IGNORE INTO memory_revision_embeddings
-            (memory_id, revision, model_id, dimensions, embedding)
-            SELECT memory_id, memory_revision, model_id, dimensions, embedding FROM memory_embeddings
-            WHERE memory_id = ? AND memory_revision = ?`)
-            .run(change.memoryId, change.expectedRevision);
           revision = resolveDreamingRevision(
             change,
             { content: String(current.content), revision: change.expectedRevision },
@@ -332,28 +327,11 @@ export class SqliteDreamingRepository {
           this.database
             .prepare("DELETE FROM memory_search WHERE memory_id = ?")
             .run(change.memoryId);
-          this.database
-            .prepare("DELETE FROM memory_embeddings WHERE memory_id = ?")
-            .run(change.memoryId);
         }
         changed = true;
         this.database
           .prepare("INSERT INTO memory_search (memory_id, content) VALUES (?, ?)")
-          .run(change.memoryId, content);
-        if (change.embedding) {
-          const embedding = change.embedding;
-          this.database
-            .prepare(`INSERT INTO memory_embeddings
-            (memory_id, model_id, dimensions, embedding, memory_revision, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
-            .run(
-              change.memoryId,
-              embedding.modelId,
-              embedding.dimensions,
-              new Uint8Array(Float32Array.from(embedding.values).buffer),
-              revision,
-              input.now,
-            );
-        }
+          .run(change.memoryId, formatFtsIndexText(content));
         this.createRevision({
           memoryId: change.memoryId,
           revision,
@@ -362,18 +340,6 @@ export class SqliteDreamingRepository {
           evidenceStatus: change.evidenceStatus,
           createdAt: input.now,
         });
-        if (change.embedding) {
-          this.database
-            .prepare(`INSERT INTO memory_revision_embeddings
-            (memory_id, revision, model_id, dimensions, embedding) VALUES (?, ?, ?, ?, ?)`)
-            .run(
-              change.memoryId,
-              revision,
-              change.embedding.modelId,
-              change.embedding.dimensions,
-              new Uint8Array(Float32Array.from(change.embedding.values).buffer),
-            );
-        }
         if (change.expectedRevision !== null)
           this.database
             .prepare(`INSERT INTO memory_revision_sources
@@ -825,12 +791,6 @@ export class SqliteDreamingRepository {
         .prepare(`INSERT OR IGNORE INTO memory_revisions
         (memory_id, revision, content, applicability, evidence_status, created_at) VALUES (?, ?, ?, NULL, 'unverified', ?)`)
         .run(change.memoryId, baseRevision, String(current.content), Number(current.updated_at));
-      this.database
-        .prepare(`INSERT OR IGNORE INTO memory_revision_embeddings
-        (memory_id, revision, model_id, dimensions, embedding)
-        SELECT memory_id, memory_revision, model_id, dimensions, embedding FROM memory_embeddings
-        WHERE memory_id = ? AND memory_revision = ?`)
-        .run(change.memoryId, baseRevision);
       // 来源集合发生变化时也发布新版本，旧版本的来源保持不变。
       const previous = this.findRevision(change.memoryId, baseRevision);
       revision = resolveDreamingRevision(
@@ -846,27 +806,10 @@ export class SqliteDreamingRepository {
         )
         .run(content, normalized, revision, input.now, change.memoryId);
       this.database.prepare("DELETE FROM memory_search WHERE memory_id = ?").run(change.memoryId);
-      this.database
-        .prepare("DELETE FROM memory_embeddings WHERE memory_id = ?")
-        .run(change.memoryId);
     }
     this.database
       .prepare("INSERT INTO memory_search (memory_id, content) VALUES (?, ?)")
-      .run(change.memoryId, content);
-    if (change.embedding) {
-      const embedding = change.embedding;
-      this.database
-        .prepare(`INSERT INTO memory_embeddings
-        (memory_id, model_id, dimensions, embedding, memory_revision, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
-        .run(
-          change.memoryId,
-          embedding.modelId,
-          embedding.dimensions,
-          new Uint8Array(Float32Array.from(embedding.values).buffer),
-          revision,
-          input.now,
-        );
-    }
+      .run(change.memoryId, formatFtsIndexText(content));
     this.createRevision({
       memoryId: change.memoryId,
       revision,
@@ -875,18 +818,6 @@ export class SqliteDreamingRepository {
       evidenceStatus: change.evidenceStatus,
       createdAt: input.now,
     });
-    if (change.embedding) {
-      this.database
-        .prepare(`INSERT INTO memory_revision_embeddings
-        (memory_id, revision, model_id, dimensions, embedding) VALUES (?, ?, ?, ?, ?)`)
-        .run(
-          change.memoryId,
-          revision,
-          change.embedding.modelId,
-          change.embedding.dimensions,
-          new Uint8Array(Float32Array.from(change.embedding.values).buffer),
-        );
-    }
     if (baseRevision !== null) {
       // 新版本保留此前可追溯的来源。
       this.database

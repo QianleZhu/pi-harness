@@ -14,7 +14,6 @@ import {
   type DreamingMemoryChange,
   DreamingRunStatus,
   type GlobalDreamingCandidate,
-  type MemoryEmbedder,
   type MemoryService,
   resolveDreamingRevision,
 } from "@pi-harness/memory";
@@ -49,7 +48,6 @@ export class DreamingService {
     private readonly memories: MemoryService,
     private readonly memoryStore: SqliteMemoryRepository,
     private readonly dreaming: SqliteDreamingRepository,
-    private readonly embedder: MemoryEmbedder,
     private readonly globalService: GlobalDreamingService,
   ) {}
 
@@ -269,28 +267,6 @@ export class DreamingService {
         this.dreaming,
         input.workspaceId,
       );
-      // 提前准备向量，失败时保留关键词召回并由现有索引机制重建。
-      for (const change of changes) {
-        try {
-          const [vector] = await this.embedder.embed(
-            "document",
-            [change.content.trim().replaceAll(/\s+/g, " ")],
-            signal,
-          );
-          if (!vector?.length || vector.some((value) => !Number.isFinite(value)))
-            throw new Error("Invalid memory embedding");
-          const magnitude = Math.hypot(...vector);
-          if (!magnitude) throw new Error("Invalid memory embedding");
-          change.embedding = {
-            modelId: this.embedder.modelId,
-            dimensions: vector.length,
-            values: vector.map((value) => value / magnitude),
-          };
-        } catch (error: unknown) {
-          if (signal.aborted) throw error;
-          change.embedding = null;
-        }
-      }
       const directoryId = randomUUID();
       directory = join(workspaceDir, directoryId);
       await mkdir(directory, { recursive: true });

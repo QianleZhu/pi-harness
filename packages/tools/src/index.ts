@@ -58,6 +58,13 @@ export {
   TextFileReadError,
 } from "./utils/file.js";
 export {
+  buildFtsMatchQuery,
+  FTS5_UNICODE61_TOKENIZER,
+  formatFtsIndexText,
+  normalizeSearchText,
+  tokenizeSearchText,
+} from "./utils/fts-search.js";
+export {
   detectImageMimeType,
   expectedImageMimeType,
   readRegularFile,
@@ -66,13 +73,11 @@ export {
 export { createToolFingerprint } from "./utils/tool-fingerprint.js";
 export {
   DEFAULT_TOOL_SEARCH_LIMIT,
-  HybridToolSearch,
   loadToolRegistrations,
   MAX_TOOL_SEARCH_RESULTS,
   MAX_VISIBLE_TOOLS,
   searchToolRegistrations,
   TOOL_SEARCH_TOOL_NAME,
-  type ToolSearchEmbedder,
   type ToolSearchMatch,
 } from "./utils/tool-search.js";
 export {

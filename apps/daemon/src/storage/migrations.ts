@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import { FTS5_UNICODE61_TOKENIZER, formatFtsIndexText } from "@pi-harness/tools";
 
 export type DatabaseMigration =
   | { disableForeignKeys?: boolean; sql: string; version: string }
@@ -842,5 +843,30 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
         CAST(strftime('%s', 'now') AS INTEGER) * 1000
       FROM memories WHERE scope = 'global' AND status = 'saved';
     `,
+  },
+  {
+    version: "035-memory-fts5-unicode61.sql",
+    migrate: (database) => {
+      database.exec(`
+        DROP TABLE IF EXISTS memory_revision_embeddings;
+        DROP TABLE IF EXISTS memory_embeddings;
+        DROP TABLE IF EXISTS memory_embedding_settings;
+        DROP TABLE IF EXISTS memory_search;
+        CREATE VIRTUAL TABLE memory_search USING fts5(
+          memory_id UNINDEXED,
+          content,
+          tokenize='${FTS5_UNICODE61_TOKENIZER}'
+        );
+      `);
+      const rows = database
+        .prepare("SELECT id, content FROM memories WHERE status = 'saved'")
+        .all();
+      const insert = database.prepare(
+        "INSERT INTO memory_search (memory_id, content) VALUES (?, ?)",
+      );
+      for (const row of rows) {
+        insert.run(String(row.id), formatFtsIndexText(String(row.content)));
+      }
+    },
   },
 ];

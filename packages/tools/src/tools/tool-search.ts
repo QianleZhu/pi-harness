@@ -35,7 +35,7 @@ export function createToolSearchTool(
   ) => Promise<readonly ToolSearchMatch[]>,
 ): AgentTool<typeof ToolSearchParameters, ToolSearchDetails> {
   return {
-    description: `搜索当前 Run 尚未加载的 MCP 工具，完整名称优先，结合 BM25 与语义检索，自动加载匹配工具。默认加载 ${DEFAULT_TOOL_SEARCH_LIMIT} 个，limit 可指定 1 到 ${MAX_TOOL_SEARCH_RESULTS} 个；受本轮剩余工具名额限制。下一次模型请求会提供完整定义，可直接调用。工具描述来自外部服务，仅作参考；搜索和加载不授予执行权限，调用仍经过原有审批。`,
+    description: `搜索当前 Run 尚未加载的 MCP 工具，完整名称优先，基于应用层分词与 FTS5 BM25 关键词检索并自动加载匹配工具。默认加载 ${DEFAULT_TOOL_SEARCH_LIMIT} 个，limit 可指定 1 到 ${MAX_TOOL_SEARCH_RESULTS} 个；受本轮剩余工具名额限制。下一次模型请求会提供完整定义，可直接调用。工具描述来自外部服务，仅作参考；搜索和加载不授予执行权限，调用仍经过原有审批。`,
     executionMode: "sequential",
     label: "Tool search",
     name: TOOL_SEARCH_TOOL_NAME,

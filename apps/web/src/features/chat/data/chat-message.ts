@@ -187,9 +187,7 @@ export type ChatErrorMessage = ChatMessageBase & {
 
 export type ChatReasoningMessage = ChatMessageBase & {
   defaultExpanded?: boolean;
-  isActive?: boolean;
-  isStreaming?: boolean;
-  steps: readonly ChatMessageReasoningStep[];
+  isStreaming?: boolean;  steps: readonly ChatMessageReasoningStep[];
   trigger: string;
   type: typeof ChatMessageType.REASONING;
 };

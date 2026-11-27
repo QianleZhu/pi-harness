@@ -50,7 +50,7 @@ import {
 } from "@pi-harness/agent-runtime/user-input";
 import type { ApprovalPolicy } from "@pi-harness/policy/approval-policy";
 import { useQuery } from "@tanstack/react-query";
-import type { ChangeEvent, ClipboardEvent } from "react";
+import type { ChangeEvent, ClipboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   createModelSelectionKey,
@@ -89,6 +89,11 @@ const PLAN_MODE_TOKEN = {
   kind: ChatComposerTokenKind.PLAN,
   label: "Plan",
 } as const;
+
+// 子菜单由悬停展开，而 React Aria 的 SubmenuTrigger 只在父菜单焦点转移或选中时收起，
+// 鼠标离开后子菜单会一直停留。这里在离开整个“+ 菜单”区域（含子菜单弹层）后主动收起。
+// 延迟用于覆盖父菜单与子菜单弹层之间的空隙，避免指针跨过空隙时误关。
+const ADD_MENU_HOVER_CLOSE_DELAY_MS = 180;
 
 type PendingAttachment = {
   file: File;
@@ -271,6 +276,7 @@ export const ChatComposer = memo(function ChatComposer({
     "mcp" | "skills" | null
   >(null);
   const [isMobileAddMenuOpen, setIsMobileAddMenuOpen] = useState(false);
+  const [isDesktopAddMenuOpen, setIsDesktopAddMenuOpen] = useState(false);
   const [isAttachmentDrawerExpanded, setIsAttachmentDrawerExpanded] = useState(true);
   const [internalStatus, setInternalStatus] = useState<ChatStatus>("ready");
   const [hasEditorContent, setHasEditorContent] = useState(() =>
@@ -367,6 +373,7 @@ export const ChatComposer = memo(function ChatComposer({
   const editorRef = useRef<ChatComposerEditorHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isSubmittingRef = useRef(false);
+  const addMenuHoverCloseTimeoutRef = useRef<number | null>(null);
   const status = statusProp ?? internalStatus;
 
   useEffect(() => {
@@ -681,6 +688,39 @@ export const ChatComposer = memo(function ChatComposer({
     setExpandedMobileAddMenuSection(null);
   };
 
+  const clearAddMenuHoverClose = useCallback(() => {
+    if (addMenuHoverCloseTimeoutRef.current === null) return;
+    window.clearTimeout(addMenuHoverCloseTimeoutRef.current);
+    addMenuHoverCloseTimeoutRef.current = null;
+  }, []);
+
+  const handleDesktopAddMenuOpenChange = (isOpen: boolean) => {
+    setIsDesktopAddMenuOpen(isOpen);
+    if (isOpen) return;
+    clearAddMenuHoverClose();
+  };
+
+  const handleAddMenuPointerEnter = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === "touch") return;
+    clearAddMenuHoverClose();
+  };
+
+  const handleAddMenuPointerLeave = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === "touch") return;
+    clearAddMenuHoverClose();
+    addMenuHoverCloseTimeoutRef.current = window.setTimeout(() => {
+      addMenuHoverCloseTimeoutRef.current = null;
+      setIsDesktopAddMenuOpen(false);
+    }, ADD_MENU_HOVER_CLOSE_DELAY_MS);
+  };
+
+  useEffect(
+    () => () => {
+      clearAddMenuHoverClose();
+    },
+    [clearAddMenuHoverClose],
+  );
+
   const addMenuTrigger = (
     <Tooltip delay={0}>
       <Button
@@ -987,134 +1027,150 @@ export const ChatComposer = memo(function ChatComposer({
                 </Popover.Content>
               </Popover>
             ) : (
-              <Dropdown>
+              <Dropdown isOpen={isDesktopAddMenuOpen} onOpenChange={handleDesktopAddMenuOpenChange}>
                 {addMenuTrigger}
                 <Dropdown.Popover className="min-w-48" placement="bottom start">
-                  <Dropdown.Menu
-                    aria-label="添加文件等内容"
-                    onAction={(key) => {
-                      if (key === "attach") fileInputRef.current?.click();
-                      if (key === "plan-mode") {
-                        handleInsertPlan();
-                      }
-                    }}
+                  <div
+                    className="contents"
+                    onPointerEnter={handleAddMenuPointerEnter}
+                    onPointerLeave={handleAddMenuPointerLeave}
                   >
-                    <Dropdown.Item id="attach" textValue="添加附件">
-                      <Paperclip className="size-4 text-muted" />
-                      <Label>添加附件</Label>
-                    </Dropdown.Item>
-                    <Dropdown.Item id="plan-mode" textValue="Plan 模式">
-                      <ListCheck className="size-4 text-muted" />
-                      <Label>Plan 模式</Label>
-                    </Dropdown.Item>
-                    <Dropdown.SubmenuTrigger>
-                      <Dropdown.Item id="skills" textValue="Skills">
-                        <WandSparkles className="size-4 text-muted" />
-                        <Label>Skills</Label>
-                        <Dropdown.SubmenuIndicator />
+                    <Dropdown.Menu
+                      aria-label="添加文件等内容"
+                      onAction={(key) => {
+                        if (key === "attach") fileInputRef.current?.click();
+                        if (key === "plan-mode") {
+                          handleInsertPlan();
+                        }
+                      }}
+                    >
+                      <Dropdown.Item id="attach" textValue="添加附件">
+                        <Paperclip className="size-4 text-muted" />
+                        <Label>添加附件</Label>
                       </Dropdown.Item>
-                      <Dropdown.Popover className="min-w-40" placement="right bottom">
-                        <Dropdown.Menu
-                          aria-label="Skills"
-                          onAction={(key) =>
-                            handleInsertToken(ChatComposerTokenKind.SKILL, skillOptions, key)
-                          }
-                        >
-                          {!activeWorkspaceId ? (
-                            <Dropdown.Item id="skills-workspace-required" isDisabled>
-                              <Label>请先选择工作区</Label>
-                            </Dropdown.Item>
-                          ) : skillsQuery.isPending ? (
-                            <Dropdown.Item id="skills-loading" isDisabled>
-                              <Label>正在加载 Skills...</Label>
-                            </Dropdown.Item>
-                          ) : skillsQuery.isError ? (
-                            <Dropdown.Item id="skills-error" isDisabled>
-                              <Label>Skills 加载失败</Label>
-                            </Dropdown.Item>
-                          ) : skillOptions.length === 0 ? (
-                            <Dropdown.Item id="skills-empty" isDisabled>
-                              <Label>暂无可用 Skill</Label>
-                            </Dropdown.Item>
-                          ) : (
-                            skillOptions.map((option) => (
-                              <Dropdown.Item
-                                key={option.id}
-                                id={option.id}
-                                textValue={option.label}
-                              >
-                                <div className="flex min-w-0 flex-1 items-center gap-3">
-                                  <SkillIcon
-                                    icon={option.icon}
-                                    className="size-4 shrink-0 text-muted"
-                                  />
-                                  <div className="flex min-w-0 flex-1 flex-col">
-                                    <Label>{option.label}</Label>
-                                    <Description className="max-w-72 truncate">
-                                      {option.description}
-                                    </Description>
-                                  </div>
-                                  <span className="shrink-0 text-sm text-muted">
-                                    {option.scopeLabel}
-                                  </span>
-                                </div>
-                              </Dropdown.Item>
-                            ))
-                          )}
-                        </Dropdown.Menu>
-                      </Dropdown.Popover>
-                    </Dropdown.SubmenuTrigger>
-                    <Dropdown.SubmenuTrigger>
-                      <Dropdown.Item id="mcp" textValue="MCP">
-                        <MCP aria-hidden className="size-4 text-muted" />
-                        <Label>MCP</Label>
-                        <Dropdown.SubmenuIndicator />
+                      <Dropdown.Item id="plan-mode" textValue="Plan 模式">
+                        <ListCheck className="size-4 text-muted" />
+                        <Label>Plan 模式</Label>
                       </Dropdown.Item>
-                      <Dropdown.Popover className="min-w-40" placement="right bottom">
-                        <Dropdown.Menu
-                          aria-label="MCP"
-                          onAction={(key) =>
-                            handleInsertToken(ChatComposerTokenKind.MCP, mcpOptions, key)
-                          }
+                      <Dropdown.SubmenuTrigger>
+                        <Dropdown.Item id="skills" textValue="Skills">
+                          <WandSparkles className="size-4 text-muted" />
+                          <Label>Skills</Label>
+                          <Dropdown.SubmenuIndicator />
+                        </Dropdown.Item>
+                        <Dropdown.Popover
+                          className="min-w-40"
+                          containerPadding={16}
+                          placement="right bottom"
                         >
-                          {isMcpOptionsPending ? (
-                            <Dropdown.Item id="mcp-loading" isDisabled>
-                              <Label>正在加载 MCP...</Label>
-                            </Dropdown.Item>
-                          ) : isMcpOptionsError ? (
-                            <Dropdown.Item id="mcp-error" isDisabled>
-                              <Label>MCP 加载失败</Label>
-                            </Dropdown.Item>
-                          ) : mcpOptions.length === 0 ? (
-                            <Dropdown.Item id="mcp-empty" isDisabled>
-                              <Label>暂无可用 MCP</Label>
-                            </Dropdown.Item>
-                          ) : (
-                            mcpOptions.map((option) => (
-                              <Dropdown.Item
-                                key={option.id}
-                                id={option.id}
-                                textValue={option.label}
-                              >
-                                <div className="flex min-w-0 flex-1 items-center gap-3">
-                                  <McpOptionIcon
-                                    className="size-4 shrink-0 text-muted"
-                                    icon={option.icon}
-                                  />
-                                  <div className="flex min-w-0 flex-1 flex-col">
-                                    <Label>{option.label}</Label>
-                                    <Description className="max-w-72 truncate">
-                                      {option.description}
-                                    </Description>
-                                  </div>
-                                </div>
+                          <Dropdown.Menu
+                            aria-label="Skills"
+                            className="max-h-[calc(100svh-2rem)] overflow-y-auto!"
+                            onAction={(key) =>
+                              handleInsertToken(ChatComposerTokenKind.SKILL, skillOptions, key)
+                            }
+                          >
+                            {!activeWorkspaceId ? (
+                              <Dropdown.Item id="skills-workspace-required" isDisabled>
+                                <Label>请先选择工作区</Label>
                               </Dropdown.Item>
-                            ))
-                          )}
-                        </Dropdown.Menu>
-                      </Dropdown.Popover>
-                    </Dropdown.SubmenuTrigger>
-                  </Dropdown.Menu>
+                            ) : skillsQuery.isPending ? (
+                              <Dropdown.Item id="skills-loading" isDisabled>
+                                <Label>正在加载 Skills...</Label>
+                              </Dropdown.Item>
+                            ) : skillsQuery.isError ? (
+                              <Dropdown.Item id="skills-error" isDisabled>
+                                <Label>Skills 加载失败</Label>
+                              </Dropdown.Item>
+                            ) : skillOptions.length === 0 ? (
+                              <Dropdown.Item id="skills-empty" isDisabled>
+                                <Label>暂无可用 Skill</Label>
+                              </Dropdown.Item>
+                            ) : (
+                              skillOptions.map((option) => (
+                                <Dropdown.Item
+                                  key={option.id}
+                                  id={option.id}
+                                  textValue={option.label}
+                                >
+                                  <div className="flex min-w-0 flex-1 items-center gap-3">
+                                    <SkillIcon
+                                      icon={option.icon}
+                                      className="size-4 shrink-0 text-muted"
+                                    />
+                                    <div className="flex min-w-0 flex-1 flex-col">
+                                      <Label>{option.label}</Label>
+                                      <Description className="max-w-72 truncate">
+                                        {option.description}
+                                      </Description>
+                                    </div>
+                                    <span className="shrink-0 text-sm text-muted">
+                                      {option.scopeLabel}
+                                    </span>
+                                  </div>
+                                </Dropdown.Item>
+                              ))
+                            )}
+                          </Dropdown.Menu>
+                        </Dropdown.Popover>
+                      </Dropdown.SubmenuTrigger>
+                      <Dropdown.SubmenuTrigger>
+                        <Dropdown.Item id="mcp" textValue="MCP">
+                          <MCP aria-hidden className="size-4 text-muted" />
+                          <Label>MCP</Label>
+                          <Dropdown.SubmenuIndicator />
+                        </Dropdown.Item>
+                        <Dropdown.Popover
+                          className="min-w-40"
+                          containerPadding={16}
+                          placement="right bottom"
+                        >
+                          <Dropdown.Menu
+                            aria-label="MCP"
+                            className="max-h-[calc(100svh-2rem)] overflow-y-auto!"
+                            onAction={(key) =>
+                              handleInsertToken(ChatComposerTokenKind.MCP, mcpOptions, key)
+                            }
+                          >
+                            {isMcpOptionsPending ? (
+                              <Dropdown.Item id="mcp-loading" isDisabled>
+                                <Label>正在加载 MCP...</Label>
+                              </Dropdown.Item>
+                            ) : isMcpOptionsError ? (
+                              <Dropdown.Item id="mcp-error" isDisabled>
+                                <Label>MCP 加载失败</Label>
+                              </Dropdown.Item>
+                            ) : mcpOptions.length === 0 ? (
+                              <Dropdown.Item id="mcp-empty" isDisabled>
+                                <Label>暂无可用 MCP</Label>
+                              </Dropdown.Item>
+                            ) : (
+                              mcpOptions.map((option) => (
+                                <Dropdown.Item
+                                  key={option.id}
+                                  id={option.id}
+                                  textValue={option.label}
+                                >
+                                  <div className="flex min-w-0 flex-1 items-center gap-3">
+                                    <McpOptionIcon
+                                      className="size-4 shrink-0 text-muted"
+                                      icon={option.icon}
+                                    />
+                                    <div className="flex min-w-0 flex-1 flex-col">
+                                      <Label>{option.label}</Label>
+                                      <Description className="max-w-72 truncate">
+                                        {option.description}
+                                      </Description>
+                                    </div>
+                                  </div>
+                                </Dropdown.Item>
+                              ))
+                            )}
+                          </Dropdown.Menu>
+                        </Dropdown.Popover>
+                      </Dropdown.SubmenuTrigger>
+                    </Dropdown.Menu>
+                  </div>
                 </Dropdown.Popover>
               </Dropdown>
             )}

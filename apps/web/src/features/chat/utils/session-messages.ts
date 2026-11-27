@@ -401,7 +401,6 @@ function markRunIntermediateMessages(
     }
     message.isIntermediate = true;
     if (durationMs !== undefined) message.turnDurationMs = durationMs;
-    if (message.type === ChatMessageType.REASONING) message.defaultExpanded = false;
   }
 }
 
@@ -1329,11 +1328,10 @@ function projectRunMessages(
         pushMessage(
           part.kind === MessageDeltaKind.THINKING
             ? {
-                defaultExpanded: true,
                 id: `${messageId}-thinking-${contentIndex}`,
                 isStreaming: contentIndex === lastContentIndex,
                 steps: [{ content: part.content, label: "分析" }],
-                trigger: "已思考",
+                trigger: contentIndex === lastContentIndex ? "正在思考" : "已思考",
                 turnId: activeRunId,
                 type: ChatMessageType.REASONING,
               }
@@ -1359,9 +1357,6 @@ function projectRunMessages(
       turnId: activeRunId,
       type: ChatMessageType.LOADING,
     });
-    for (const message of messagesByRunId.get(activeRunId) ?? []) {
-      if (message.type === ChatMessageType.REASONING) message.isActive = true;
-    }
   }
 
   return messages;

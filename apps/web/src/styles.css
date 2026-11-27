@@ -68,7 +68,10 @@
   margin-top: calc(var(--spacing, 0.25rem) * 4);
 }
 
-.markdown a.link:not(:hover):not([data-hovered="true"]):not(:active):not([data-pressed="true"]) {
+.markdown
+  a.link:not(:hover):not([data-hovered="true"]):not(:active):not(
+    [data-pressed="true"]
+  ) {
   text-decoration-line: none;
 }
 
@@ -164,7 +167,8 @@ html[data-overlay-scrollbars] *::-webkit-scrollbar {
   scrollbar-width: none;
 }
 
-:is([data-slot="agent-plan"], [data-slot="todo-list"]) > .scroll-shadow::-webkit-scrollbar {
+:is([data-slot="agent-plan"], [data-slot="todo-list"])
+  > .scroll-shadow::-webkit-scrollbar {
   display: none;
 }
 
@@ -263,7 +267,8 @@ html[data-overlay-scrollbars] *::-webkit-scrollbar {
 }
 
 @media (min-width: 1025px) {
-  [data-app-layout][data-resizable] [data-panel]:has(> .app-layout__aside-panel) {
+  [data-app-layout][data-resizable]
+    [data-panel]:has(> .app-layout__aside-panel) {
     transition: flex-grow 220ms cubic-bezier(0.22, 1, 0.36, 1);
   }
 
@@ -274,7 +279,8 @@ html[data-overlay-scrollbars] *::-webkit-scrollbar {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  [data-app-layout][data-resizable] [data-panel]:has(> .app-layout__aside-panel) {
+  [data-app-layout][data-resizable]
+    [data-panel]:has(> .app-layout__aside-panel) {
     transition: none;
   }
 }
@@ -309,12 +315,32 @@ html[data-overlay-scrollbars] *::-webkit-scrollbar {
     --chat-token-mcp: oklch(0.58 0.1 145);
     --chat-token-skill: oklch(0.58 0.18 300);
     --chat-token-plan: oklch(0.64 0.17 245);
-    --chat-token-plan-soft: color-mix(in oklab, var(--chat-token-plan) 12%, transparent);
-    --chat-token-file-soft: color-mix(in oklab, var(--chat-token-file) 12%, transparent);
+    --chat-token-plan-soft: color-mix(
+      in oklab,
+      var(--chat-token-plan) 12%,
+      transparent
+    );
+    --chat-token-file-soft: color-mix(
+      in oklab,
+      var(--chat-token-file) 12%,
+      transparent
+    );
     --chat-token-folder-soft: var(--chat-token-file-soft);
-    --chat-token-image-soft: color-mix(in oklab, var(--chat-token-image) 12%, transparent);
-    --chat-token-mcp-soft: color-mix(in oklab, var(--chat-token-mcp) 12%, transparent);
-    --chat-token-skill-soft: color-mix(in oklab, var(--chat-token-skill) 12%, transparent);
+    --chat-token-image-soft: color-mix(
+      in oklab,
+      var(--chat-token-image) 12%,
+      transparent
+    );
+    --chat-token-mcp-soft: color-mix(
+      in oklab,
+      var(--chat-token-mcp) 12%,
+      transparent
+    );
+    --chat-token-skill-soft: color-mix(
+      in oklab,
+      var(--chat-token-skill) 12%,
+      transparent
+    );
     --background: oklch(0.985 0 0);
     --surface: var(--white);
     --surface-foreground: var(--foreground);
@@ -323,7 +349,8 @@ html[data-overlay-scrollbars] *::-webkit-scrollbar {
     --field-border: transparent;
     --field-border-hover: transparent;
     --field-border-focus: transparent;
-    --field-shadow: 0 4px 16px rgba(24, 24, 27, 0.04), 0 1px 4px rgba(24, 24, 27, 0.02);
+    --field-shadow:
+      0 4px 16px rgba(24, 24, 27, 0.04), 0 1px 4px rgba(24, 24, 27, 0.02);
   }
 
   .dark,
@@ -334,12 +361,32 @@ html[data-overlay-scrollbars] *::-webkit-scrollbar {
     --chat-token-mcp: oklch(0.7 0.11 145);
     --chat-token-skill: oklch(0.72 0.15 300);
     --chat-token-plan: oklch(0.76 0.13 245);
-    --chat-token-plan-soft: color-mix(in oklab, var(--chat-token-plan) 14%, transparent);
-    --chat-token-file-soft: color-mix(in oklab, var(--chat-token-file) 14%, transparent);
+    --chat-token-plan-soft: color-mix(
+      in oklab,
+      var(--chat-token-plan) 14%,
+      transparent
+    );
+    --chat-token-file-soft: color-mix(
+      in oklab,
+      var(--chat-token-file) 14%,
+      transparent
+    );
     --chat-token-folder-soft: var(--chat-token-file-soft);
-    --chat-token-image-soft: color-mix(in oklab, var(--chat-token-image) 14%, transparent);
-    --chat-token-mcp-soft: color-mix(in oklab, var(--chat-token-mcp) 14%, transparent);
-    --chat-token-skill-soft: color-mix(in oklab, var(--chat-token-skill) 14%, transparent);
+    --chat-token-image-soft: color-mix(
+      in oklab,
+      var(--chat-token-image) 14%,
+      transparent
+    );
+    --chat-token-mcp-soft: color-mix(
+      in oklab,
+      var(--chat-token-mcp) 14%,
+      transparent
+    );
+    --chat-token-skill-soft: color-mix(
+      in oklab,
+      var(--chat-token-skill) 14%,
+      transparent
+    );
   }
 }
 
@@ -347,7 +394,8 @@ html[data-overlay-scrollbars] *::-webkit-scrollbar {
   display: none;
 }
 
-.sidebar__menu-item[data-workspace-item] [data-slot="sidebar-menu-item-content"] {
+.sidebar__menu-item[data-workspace-item]
+  [data-slot="sidebar-menu-item-content"] {
   gap: calc(var(--spacing, 0.25rem) * 2);
 }
 
@@ -451,11 +499,13 @@ html[data-overlay-scrollbars] *::-webkit-scrollbar {
   color: var(--accent);
 }
 
-.sidebar__menu-item[data-workspace-item][data-expanded] .sidebar__workspace-folder-closed {
+.sidebar__menu-item[data-workspace-item][data-expanded]
+  .sidebar__workspace-folder-closed {
   display: none;
 }
 
-.sidebar__menu-item[data-workspace-item][data-expanded] .sidebar__workspace-folder-open {
+.sidebar__menu-item[data-workspace-item][data-expanded]
+  .sidebar__workspace-folder-open {
   display: block;
 }
 

@@ -103,17 +103,17 @@ Web 登录需要有效的 GitHub OAuth App Client ID 和 Client Secret，回调�
 ├── harness.sqlite-wal           # SQLite WAL 日志
 ├── harness.sqlite-shm           # SQLite WAL 共享内存文件
 ├── sessions/<sessionId>.jsonl   # 完整 HarnessEvent 事实源
+├── dreaming/<workspaceId>/      # 已发布的注入上下文与 Wiki 版本
 ├── credentials.json            # Provider API Key / OAuth
 ├── mcp-credentials.json         # MCP Header、env、OAuth 等敏感配置
 ├── skill-credentials.json       # 插件 OAuth
 ├── sandbox-credentials.json     # 可选 Sandbox 运行凭据
 ├── sandbox-policy.json          # Sandbox Profile 与网络规则
 ├── allowed-command-prefixes.json # 已允许的命令 argv 前缀
-├── skills/                      # 用户全局 Skill
-└── models/                      # 本地 embedding 缓存
+└── skills/                      # 用户全局 Skill
 ```
 
-[openHarnessDatabase](../apps/daemon/src/storage/database.ts) 开启 foreign keys/WAL，在事务中应用 [显式 migrations](../apps/daemon/src/storage/migrations.ts)，当前最后一条为 `025-add-board-task-confirmation.sql`。SQLite 保存结构化配置、长期记忆、看板任务和 Session 轻量索引；会话全文搜索、Memory FTS/向量和 MCP 能力目录是可重建派生数据。Sub Agent 的完整运行记录继续放在所属 Session JSONL。
+[openHarnessDatabase](../apps/daemon/src/storage/database.ts) 开启 foreign keys/WAL，在事务中应用 [显式 migrations](../apps/daemon/src/storage/migrations.ts)。迁移 `035-memory-fts5-unicode61.sql` 移除旧的记忆向量表，以预分词文本重建记忆关键词索引。SQLite 保存结构化配置、长期记忆、看板任务和 Session 轻量索引。会话全文索引、记忆关键词索引和 MCP 能力目录均可重建。Sub Agent 的完整运行记录保存在所属 Session JSONL。
 
 SessionEventStore 串行追加并同步写盘，seq 严格递增但可不连续；`message.delta`、`tool.updated`、`command.updated`、`subagent.message.delta` 和 `subagent.tool.updated` 只实时发送。启动恢复收束中断 Run/子执行。解析只修复不完整末行，中间损坏报错。先写 JSONL 后更新 SQLite 索引，不删除事实记录回滚索引失败。
 
@@ -126,7 +126,7 @@ SessionEventStore 串行追加并同步写盘，seq 严格递增但可不连续�
 1. 打开 SQLite、独立 Credential Store，创建文件打开与系统权限服务。
 2. 装配 MCP 配置、Client、OAuth、诊断、插件连接，复用有效本地能力目录；仅对缺失、版本不匹配或损坏的缓存启动可取消的后台补齐。
 3. 初始化 JSONL、SSE broker 和 BoardTask 投影，恢复中断执行。
-4. 创建 ProviderService、本地 embedding、MemoryService、AgentManager、WorkspaceService、SessionService，初始化搜索索引。
+4. 创建 ProviderService、MemoryService、AgentManager、WorkspaceService、SessionService 和 Dreaming Worker，初始化搜索索引。
 5. 注册 Host/Origin 与桌面 Cookie 检查，以及 auth、settings、board、health、MCP、memory、provider、session、skill、workspace 路由。桌面配置开启时额外托管 Web 与 bootstrap/shutdown。
 
 状态变更由 [request-security](../apps/daemon/src/utils/request-security.ts) 检查配置的 Web Origin 和 `x-pi-harness-request: 1`；桌面启动先用随机令牌换 daemon Cookie。SSE 断开不停止 Agent。关闭时取消预热、关闭选择器与 Workspace 操作、收束 Session/命令执行、关闭 MCP/Provider、清理 broker，最后关闭数据库。
@@ -143,4 +143,4 @@ PI_HARNESS_EVAL_PROVIDER=<provider> PI_HARNESS_EVAL_MODEL=<model> pnpm eval:cont
 
 认证由 pi-ai Models 从进程环境取得，不读取 daemon credentials.json。可选 PI_HARNESS_EVAL_CONTEXT_WINDOW 默认 12000，最小 6000；PI_HARNESS_EVAL_SESSIONS_PATH 和 PI_HARNESS_EVAL_SESSION_ID 必须同时提供，用于读取现有有效 Session 消息再追加评估长任务。该入口检查压缩中的纠正、附件约束和失败保留，不等于整个 Agent 多轮 burn-in。
 
-运行验收范围：真实 Provider 长任务与压缩恢复、MCP 连接/鉴权/重连、Sub Agent 并行/嵌套/审批/写入冲突/停止/重启、看板待确认与完成、embedding 首次下载和离线降级、macOS TCC 授权，以及安装包在目标机器启动。
+运行验收范围包括真实 Provider 长任务与压缩恢复、MCP 连接/鉴权/重连、Sub Agent 并行/嵌套/审批/写入冲突/停止/重启、看板待确认与完成、记忆关键词检索、Dreaming 整理与发布、macOS TCC 授权，以及安装包在目标机器启动。
